@@ -4,7 +4,8 @@ After=network.target
 
 [Service]
 Type=simple
-User=%i
+User=claude
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 WorkingDirectory=/path/to/claudecode-slackbot
 EnvironmentFile=/path/to/claudecode-slackbot/.env
 ExecStart=/usr/bin/uv run app.py

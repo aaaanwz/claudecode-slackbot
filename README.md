@@ -79,6 +79,7 @@ sudo vi /etc/systemd/system/claudecode-slackbot.service
 - `WorkingDirectory=` — リポジトリの絶対パス
 - `EnvironmentFile=` — `.env` の絶対パス
 - `ExecStart=` の `uv` パス — `which uv` で確認
+- `Environment=PATH=` — `claude` CLI を含むディレクトリを追加（`which claude` で確認）
 
 ### 2. サービスを有効化・起動する
 
