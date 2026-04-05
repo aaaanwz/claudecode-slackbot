@@ -11,15 +11,15 @@ from pythonjsonlogger.json import JsonFormatter
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-handler = logging.StreamHandler()
+log_handler = logging.StreamHandler()
 formatter = JsonFormatter(
     "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
     datefmt="%Y-%m-%dT%H:%M:%S",
     rename_fields={"asctime": "time", "levelname": "severity"},
 )
 formatter.converter = time.gmtime
-handler.setFormatter(formatter)
-logging.basicConfig(level=logging.INFO, handlers=[handler])
+log_handler.setFormatter(formatter)
+logging.basicConfig(level=logging.INFO, handlers=[log_handler])
 logger = logging.getLogger(__name__)
 
 load_dotenv()
@@ -195,5 +195,5 @@ def handle_message(event, say, client):
 if __name__ == "__main__":
     BOT_USER_ID = app.client.auth_test()["user_id"]
     logger.info("Bot started", extra={"bot_user_id": BOT_USER_ID})
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
+    socket_handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
+    socket_handler.start()
