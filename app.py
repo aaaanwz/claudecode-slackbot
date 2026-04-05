@@ -76,6 +76,81 @@ def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
+def markdown_to_slack_mrkdwn(text):
+    """MarkdownテキストをSlackのmrkdwn形式に変換する"""
+    # コードブロックとインラインコードを保護（変換対象から除外）
+    protected = []
+
+    def protect(match):
+        protected.append(match.group(0))
+        return f"\x00P{len(protected) - 1}\x00"
+
+    text = re.sub(r"```[\s\S]*?```", protect, text)
+    text = re.sub(r"`[^`]+`", protect, text)
+
+    # Markdownテーブルをコードブロックに変換
+    lines = text.split("\n")
+    result = []
+    table_lines = []
+    in_table = False
+
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("|") and stripped.endswith("|"):
+            if not in_table:
+                in_table = True
+                table_lines = []
+            # セパレーター行(|---|---|)はスキップ
+            if re.match(r"^\|[\s\-:|]+\|$", stripped):
+                continue
+            table_lines.append(stripped)
+        else:
+            if in_table:
+                result.append("```")
+                result.extend(table_lines)
+                result.append("```")
+                in_table = False
+            result.append(line)
+
+    if in_table:
+        result.append("```")
+        result.extend(table_lines)
+        result.append("```")
+
+    text = "\n".join(result)
+
+    # 見出し: ## heading → *heading*
+    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
+
+    # リンク: [text](url) → <url|text>
+    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
+
+    # Bold: **text** → *text*（先にプレースホルダーに退避）
+    bolds = []
+
+    def save_bold(match):
+        bolds.append(match.group(1))
+        return f"\x00B{len(bolds) - 1}\x00"
+
+    text = re.sub(r"\*\*(.+?)\*\*", save_bold, text)
+
+    # Italic: *text* → _text_
+    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"_\1_", text)
+
+    # Boldプレースホルダーを復元
+    for i, content in enumerate(bolds):
+        text = text.replace(f"\x00B{i}\x00", f"*{content}*")
+
+    # Strikethrough: ~~text~~ → ~text~
+    text = re.sub(r"~~(.+?)~~", r"~\1~", text)
+
+    # 保護したコードブロック・インラインコードを復元
+    for i, code in enumerate(protected):
+        text = text.replace(f"\x00P{i}\x00", code)
+
+    return text
+
+
 def run_claude(prompt, thread_ts):
     session_id = thread_session_ids.get(thread_ts)
     if session_id is None:
@@ -121,6 +196,7 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
             response = run_claude(text, thread_ts)
             if not response:
                 response = "応答を生成できませんでした。"
+            response = markdown_to_slack_mrkdwn(response)
             if len(response) > 3900:
                 response = response[:3900] + "\n\n... (truncated)"
             logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
