@@ -5,7 +5,7 @@
 
 ## 前提条件
 
-- Python 3.11+
+- [uv](https://docs.astral.sh/uv/)
 - `claude` CLI がインストール済みで、PATHが通っていること
 
 ## Slack Appのセットアップ
@@ -52,13 +52,6 @@
 git clone https://github.com/aaaanwz/claudecode-slackbot.git
 cd claudecode-slackbot
 
-# 仮想環境の作成と有効化
-python3 -m venv .venv
-source .venv/bin/activate
-
-# 依存パッケージのインストール
-pip install -r requirements.txt
-
 # 環境変数の設定
 cp .env.example .env
 # .env を編集し、控えておいたトークンを設定
@@ -67,8 +60,40 @@ cp .env.example .env
 ## 起動
 
 ```bash
-source .venv/bin/activate
-python app.py
+uv run app.py
+```
+
+## サービスとして常駐させる (systemd)
+
+### 1. ユニットファイルを配置する
+
+リポジトリに含まれる `claudecode-slackbot.service` を編集し、パスとユーザーを環境に合わせて書き換える。
+
+```bash
+sudo cp claudecode-slackbot.service /etc/systemd/system/
+sudo vi /etc/systemd/system/claudecode-slackbot.service
+```
+
+書き換える箇所:
+- `User=` — 実行ユーザー
+- `WorkingDirectory=` — リポジトリの絶対パス
+- `EnvironmentFile=` — `.env` の絶対パス
+- `ExecStart=` の `uv` パス — `which uv` で確認
+- `Environment=PATH=` — `claude` CLI を含むディレクトリを追加（`which claude` で確認）
+
+### 2. サービスを有効化・起動する
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable claudecode-slackbot
+sudo systemctl start claudecode-slackbot
+```
+
+### 3. 動作確認
+
+```bash
+sudo systemctl status claudecode-slackbot
+sudo journalctl -u claudecode-slackbot -f
 ```
 
 ## 使い方
