@@ -1,6 +1,6 @@
 # Claude Code Slackbot
 
-GCEインスタンス上のClaude CodeをSlackから操作するためのBot。
+サーバー上のClaude CodeをSlackから操作するためのBot。
 メンションするとClaude Codeのセッションが開始され、スレッド内で会話を続けることができる。
 
 ## 前提条件
@@ -49,7 +49,8 @@ GCEインスタンス上のClaude CodeをSlackから操作するためのBot。
 ## サーバーのセットアップ
 
 ```bash
-cd /home/anazawa/private/claudecode-slackbot
+git clone https://github.com/aaaanwz/claudecode-slackbot.git
+cd claudecode-slackbot
 
 # 仮想環境の作成と有効化
 python3 -m venv .venv
@@ -75,3 +76,7 @@ python app.py
 1. Botをメンションしてメッセージを送信すると、Claude Codeのセッションが開始される
 2. スレッド内で返信すると、同じセッションで会話が継続される（メンション不要）
 3. 処理中は :hourglass_flowing_sand: リアクションが表示される
+
+## ライセンス
+
+[MIT License](LICENSE)
