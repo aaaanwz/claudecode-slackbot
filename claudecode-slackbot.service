@@ -1,0 +1,15 @@
+[Unit]
+Description=Claude Code Slackbot
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/path/to/claudecode-slackbot
+EnvironmentFile=/path/to/claudecode-slackbot/.env
+ExecStart=/path/to/claudecode-slackbot/.venv/bin/python app.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

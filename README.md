@@ -71,6 +71,38 @@ source .venv/bin/activate
 python app.py
 ```
 
+## サービスとして常駐させる (systemd)
+
+### 1. ユニットファイルを配置する
+
+リポジトリに含まれる `claudecode-slackbot.service` を編集し、パスとユーザーを環境に合わせて書き換える。
+
+```bash
+cp claudecode-slackbot.service /etc/systemd/system/
+vi /etc/systemd/system/claudecode-slackbot.service
+```
+
+書き換える箇所:
+- `User=` — 実行ユーザー
+- `WorkingDirectory=` — リポジトリの絶対パス
+- `EnvironmentFile=` — `.env` の絶対パス
+- `ExecStart=` — `.venv/bin/python app.py` の絶対パス
+
+### 2. サービスを有効化・起動する
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable claudecode-slackbot
+sudo systemctl start claudecode-slackbot
+```
+
+### 3. 動作確認
+
+```bash
+sudo systemctl status claudecode-slackbot
+sudo journalctl -u claudecode-slackbot -f
+```
+
 ## 使い方
 
 1. Botをメンションしてメッセージを送信すると、Claude Codeのセッションが開始される
