@@ -3,6 +3,7 @@ import re
 import subprocess
 import threading
 import time
+import uuid
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -22,6 +23,7 @@ thread_locks_lock = threading.Lock()
 
 SESSION_TTL = 3600  # 1時間でセッションを期限切れにする
 session_last_active = {}
+thread_session_ids = {}
 
 
 def get_thread_lock(thread_ts):
@@ -43,6 +45,7 @@ def cleanup_expired_sessions():
         for ts in expired:
             active_sessions.discard(ts)
             session_last_active.pop(ts, None)
+            thread_session_ids.pop(ts, None)
         # thread_locks_lockもsessions_lock内で取得する（ロック順序: sessions_lock → thread_locks_lock）
         with thread_locks_lock:
             for ts in expired:
@@ -58,47 +61,27 @@ def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
-def fetch_thread_history(client, channel, thread_ts):
-    """スレッドの会話履歴を取得してプロンプト用のコンテキストを構築する"""
-    result = client.conversations_replies(channel=channel, ts=thread_ts)
-    messages = result.get("messages", [])
+def run_claude(prompt, thread_ts):
+    session_id = thread_session_ids.get(thread_ts)
+    if session_id is None:
+        # 初回: 新規セッションを作成
+        session_id = str(uuid.uuid4())
+        cmd = ["claude", "-p", "--session-id", session_id, prompt]
+    else:
+        # 2回目以降: 既存セッションを再開
+        cmd = ["claude", "-p", "--resume", session_id, prompt]
 
-    history = []
-    for msg in messages:
-        if msg["ts"] == thread_ts and not msg.get("thread_ts"):
-            # スレッドの親メッセージ（最初のメンション）
-            role = "User"
-        elif msg.get("bot_id") or (BOT_USER_ID and msg.get("user") == BOT_USER_ID):
-            role = "Assistant"
-        else:
-            role = "User"
-        text = strip_mention(msg.get("text", ""))
-        if text:
-            history.append(f"{role}: {text}")
-
-    return history
-
-
-def build_prompt(text, history):
-    """会話履歴を含むプロンプトを構築する"""
-    if len(history) <= 1:
-        return text
-
-    # 最後のメッセージ（今回の入力）は除外して履歴として渡す
-    past = history[:-1]
-    context = "\n".join(past)
-    return f"以下はこれまでの会話履歴です:\n{context}\n\nUser: {text}"
-
-
-def run_claude(prompt):
     result = subprocess.run(
-        ["claude", "-p", prompt],
+        cmd,
         capture_output=True,
         text=True,
         timeout=300,
     )
     if result.returncode != 0:
         raise RuntimeError(result.stderr.strip() if result.stderr else f"claude exited with code {result.returncode}")
+
+    # 成功したらセッションIDを記録
+    thread_session_ids[thread_ts] = session_id
     return result.stdout.strip()
 
 
@@ -113,9 +96,7 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     lock = get_thread_lock(thread_ts)
     with lock:
         try:
-            history = fetch_thread_history(client, channel, thread_ts)
-            prompt = build_prompt(text, history)
-            response = run_claude(prompt)
+            response = run_claude(text, thread_ts)
             if not response:
                 response = "応答を生成できませんでした。"
             if len(response) > 3900:
