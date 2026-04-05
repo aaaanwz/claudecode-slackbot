@@ -91,9 +91,12 @@ def run_claude(prompt, thread_ts):
         timeout=300,
     )
     if result.returncode != 0:
-        error_msg = result.stderr.strip() if result.stderr else f"claude exited with code {result.returncode}"
-        logger.error("claude CLI error", extra={"thread_ts": thread_ts, "detail": error_msg})
-        raise RuntimeError(error_msg)
+        error_msg = (
+            result.stderr.strip()
+            if result.stderr
+            else f"claude exited with code {result.returncode}"
+        )
+        raise RuntimeError(f"claude CLI error: {error_msg}")
 
     # 成功したらセッションIDを記録
     thread_session_ids[thread_ts] = session_id
