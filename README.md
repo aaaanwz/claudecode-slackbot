@@ -70,8 +70,8 @@ uv run app.py
 リポジトリに含まれる `claudecode-slackbot.service` を編集し、パスとユーザーを環境に合わせて書き換える。
 
 ```bash
-cp claudecode-slackbot.service /etc/systemd/system/
-vi /etc/systemd/system/claudecode-slackbot.service
+sudo cp claudecode-slackbot.service /etc/systemd/system/
+sudo vi /etc/systemd/system/claudecode-slackbot.service
 ```
 
 書き換える箇所:
