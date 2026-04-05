@@ -1,6 +1,12 @@
 # Claude Code Slackbot
 
 GCEインスタンス上のClaude CodeをSlackから操作するためのBot。
+メンションするとClaude Codeのセッションが開始され、スレッド内で会話を続けることができる。
+
+## 前提条件
+
+- Python 3.11+
+- `claude` CLI がインストール済みで、PATHが通っていること
 
 ## Slack Appのセットアップ
 
@@ -20,6 +26,7 @@ GCEインスタンス上のClaude CodeをSlackから操作するためのBot。
 1. 左メニュー「Event Subscriptions」を開き、Enable Eventsをオンにする
 2. 「Subscribe to bot events」で以下を追加:
    - `app_mention`
+   - `message.channels`（スレッドでの会話継続に必要）
 3. 「Save Changes」をクリック
 
 ### 4. Bot Token Scopesを設定する
@@ -28,8 +35,12 @@ GCEインスタンス上のClaude CodeをSlackから操作するためのBot。
 2. 「Scopes」→「Bot Token Scopes」に以下を追加:
    - `app_mentions:read`
    - `chat:write`
+   - `channels:history`（スレッド内メッセージの受信に必要）
+   - `reactions:write`（処理中インジケーターに必要）
 3. ページ上部の「Install to Workspace」をクリックし、権限を許可
 4. 表示される `xoxb-` で始まるBot User OAuth Tokenを控える
+
+> **Note:** プライベートチャンネルでも使用する場合は、`message.groups` イベントと `groups:history` スコープも追加する。
 
 ### 5. Botをチャンネルに招待する
 
@@ -59,4 +70,8 @@ source .venv/bin/activate
 python app.py
 ```
 
-Botにメンションすると、サーバーの現在時刻を返す。
+## 使い方
+
+1. Botをメンションしてメッセージを送信すると、Claude Codeのセッションが開始される
+2. スレッド内で返信すると、同じセッションで会話が継続される（メンション不要）
+3. 処理中は :hourglass_flowing_sand: リアクションが表示される
