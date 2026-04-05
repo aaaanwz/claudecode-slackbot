@@ -1,3 +1,4 @@
+import logging
 import os
 import re
 import subprocess
@@ -6,8 +7,20 @@ import time
 import uuid
 
 from dotenv import load_dotenv
+from pythonjsonlogger.json import JsonFormatter
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+
+log_handler = logging.StreamHandler()
+formatter = JsonFormatter(
+    "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+    rename_fields={"asctime": "time", "levelname": "severity"},
+)
+formatter.converter = time.gmtime
+log_handler.setFormatter(formatter)
+logging.basicConfig(level=logging.INFO, handlers=[log_handler])
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 
@@ -78,7 +91,12 @@ def run_claude(prompt, thread_ts):
         timeout=300,
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.strip() if result.stderr else f"claude exited with code {result.returncode}")
+        error_msg = (
+            result.stderr.strip()
+            if result.stderr
+            else f"claude exited with code {result.returncode}"
+        )
+        raise RuntimeError(f"claude CLI error: {error_msg}")
 
     # 成功したらセッションIDを記録
     thread_session_ids[thread_ts] = session_id
@@ -96,15 +114,19 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     lock = get_thread_lock(thread_ts)
     with lock:
         try:
+            logger.info("user message", extra={"channel": channel, "thread_ts": thread_ts, "text": text})
             response = run_claude(text, thread_ts)
             if not response:
                 response = "応答を生成できませんでした。"
             if len(response) > 3900:
                 response = response[:3900] + "\n\n... (truncated)"
+            logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
             say(text=response, thread_ts=thread_ts)
         except subprocess.TimeoutExpired:
+            logger.error("timeout", extra={"channel": channel, "thread_ts": thread_ts})
             say(text="タイムアウトしました（5分）。", thread_ts=thread_ts)
         except Exception:
+            logger.exception("error", extra={"channel": channel, "thread_ts": thread_ts})
             say(text="エラーが発生しました。", thread_ts=thread_ts)
         finally:
             try:
@@ -172,5 +194,6 @@ def handle_message(event, say, client):
 
 if __name__ == "__main__":
     BOT_USER_ID = app.client.auth_test()["user_id"]
-    handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
-    handler.start()
+    logger.info("Bot started", extra={"bot_user_id": BOT_USER_ID})
+    socket_handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
+    socket_handler.start()
