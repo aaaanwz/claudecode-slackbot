@@ -9,18 +9,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## 開発環境のセットアップ
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
 cp .env.example .env  # SLACK_BOT_TOKEN, SLACK_APP_TOKEN を設定
 ```
 
-前提: Python 3.11+、`claude` CLIがインストール済みであること。
+前提: [uv](https://docs.astral.sh/uv/)、`claude` CLIがインストール済みであること。
 
 ## 起動
 
 ```bash
-python app.py
+uv run app.py
 ```
 
 ## アーキテクチャ
