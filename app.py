@@ -12,12 +12,13 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 handler = logging.StreamHandler()
-handler.setFormatter(
-    JsonFormatter(
-        "%(asctime)s %(levelname)s %(message)s",
-        rename_fields={"asctime": "time", "levelname": "severity"},
-    )
+formatter = JsonFormatter(
+    "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
+    datefmt="%Y-%m-%dT%H:%M:%S",
+    rename_fields={"asctime": "time", "levelname": "severity"},
 )
+formatter.converter = time.gmtime
+handler.setFormatter(formatter)
 logging.basicConfig(level=logging.INFO, handlers=[handler])
 logger = logging.getLogger(__name__)
 
