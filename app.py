@@ -24,6 +24,8 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
+CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
+
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
 BOT_USER_ID = None
@@ -89,6 +91,7 @@ def run_claude(prompt, thread_ts):
         capture_output=True,
         text=True,
         timeout=300,
+        cwd=CLAUDE_WORKING_DIR,
     )
     if result.returncode != 0:
         error_msg = (
