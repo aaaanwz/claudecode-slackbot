@@ -2,6 +2,7 @@ import os
 import re
 import subprocess
 import threading
+import time
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -31,9 +32,7 @@ def get_thread_lock(thread_ts):
 
 
 def cleanup_expired_sessions():
-    """期限切れのセッションとロックを削除する"""
-    import time
-
+    """期限切れのセッションとロックを削除する。sessions_lockの外から呼ぶこと。"""
     now = time.time()
     with sessions_lock:
         expired = [
@@ -44,15 +43,14 @@ def cleanup_expired_sessions():
         for ts in expired:
             active_sessions.discard(ts)
             session_last_active.pop(ts, None)
-    with thread_locks_lock:
-        for ts in expired:
-            thread_locks.pop(ts, None)
+        # thread_locks_lockもsessions_lock内で取得する（ロック順序: sessions_lock → thread_locks_lock）
+        with thread_locks_lock:
+            for ts in expired:
+                thread_locks.pop(ts, None)
 
 
-def touch_session(thread_ts):
-    """セッションの最終アクティブ時刻を更新する"""
-    import time
-
+def _touch_session(thread_ts):
+    """セッションの最終アクティブ時刻を更新する。sessions_lockを保持した状態で呼ぶこと。"""
     session_last_active[thread_ts] = time.time()
 
 
@@ -151,7 +149,7 @@ def handle_mention(event, say, client):
     cleanup_expired_sessions()
     with sessions_lock:
         active_sessions.add(thread_ts)
-        touch_session(thread_ts)
+        _touch_session(thread_ts)
 
     threading.Thread(
         target=post_response,
@@ -176,7 +174,7 @@ def handle_message(event, say, client):
     with sessions_lock:
         if thread_ts not in active_sessions:
             return
-        touch_session(thread_ts)
+        _touch_session(thread_ts)
 
     text = strip_mention(text)
     if not text:
