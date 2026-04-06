@@ -63,6 +63,12 @@ cp .env.example .env
 uv run app.py
 ```
 
+## テスト
+
+```bash
+uv run --group dev pytest
+```
+
 ## サービスとして常駐させる (systemd)
 
 ### 1. ユニットファイルを配置する

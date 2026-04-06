@@ -119,8 +119,8 @@ def markdown_to_slack_mrkdwn(text):
 
     text = "\n".join(result)
 
-    # 見出し: ## heading → *heading*
-    text = re.sub(r"^#{1,6}\s+(.+)$", r"*\1*", text, flags=re.MULTILINE)
+    # 箇条書き: - item → • item
+    text = re.sub(r"^(\s*)[-*]\s+", lambda m: m.group(1) + "• ", text, flags=re.MULTILINE)
 
     # リンク: [text](url) → <url|text>
     text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
@@ -133,6 +133,13 @@ def markdown_to_slack_mrkdwn(text):
         return f"\x00B{len(bolds) - 1}\x00"
 
     text = re.sub(r"\*\*(.+?)\*\*", save_bold, text)
+
+    # 見出し: ## heading → *heading*（boldと同じプレースホルダーで保護）
+    def save_heading(match):
+        bolds.append(match.group(1))
+        return f"\x00B{len(bolds) - 1}\x00"
+
+    text = re.sub(r"^#{1,6}\s+(.+)$", save_heading, text, flags=re.MULTILINE)
 
     # Italic: *text* → _text_
     text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"_\1_", text)
