@@ -40,6 +40,10 @@ thread_locks_lock = threading.Lock()
 thread_session_ids = {}
 
 
+class SessionResumeError(Exception):
+    pass
+
+
 def get_thread_lock(thread_ts):
     with thread_locks_lock:
         if thread_ts not in thread_locks:
@@ -80,15 +84,41 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
     return chunks
 
 
-def run_claude(prompt, thread_ts):
+def fetch_thread_history(client, channel, thread_ts):
+    """Slackスレッドの過去のやり取りを会話コンテキスト文字列として返す。"""
+    resp = client.conversations_replies(channel=channel, ts=thread_ts, limit=100)
+    messages = resp.get("messages", [])
+    lines = []
+    for msg in messages:
+        if msg.get("subtype"):
+            continue
+        is_bot = msg.get("bot_id") is not None
+        role = "assistant" if is_bot else "user"
+        text = msg.get("text", "")
+        if not is_bot:
+            text = strip_mention(text)
+        if text:
+            lines.append(f"[{role}]\n{text}")
+    return "\n\n".join(lines)
+
+
+def run_claude(prompt, thread_ts, conversation_context=None):
     session_id = thread_session_ids.get(thread_ts)
+    is_resume = session_id is not None and conversation_context is None
     if session_id is None:
-        # 初回: 新規セッションを作成
+        # 新規セッションを作成
         session_id = str(uuid.uuid4())
-        cmd = ["claude", "-p", "--session-id", session_id, prompt]
-    else:
-        # 2回目以降: 既存セッションを再開
+
+    if is_resume:
         cmd = ["claude", "-p", "--resume", session_id, prompt]
+    else:
+        full_prompt = prompt
+        if conversation_context:
+            full_prompt = (
+                "以下はこれまでの会話履歴です。最後のユーザーメッセージに応答してください:\n\n"
+                + conversation_context
+            )
+        cmd = ["claude", "-p", "--session-id", session_id, full_prompt]
 
     result = subprocess.run(
         cmd,
@@ -103,6 +133,9 @@ def run_claude(prompt, thread_ts):
             if result.stderr
             else f"claude exited with code {result.returncode}"
         )
+        if is_resume:
+            thread_session_ids.pop(thread_ts, None)
+            raise SessionResumeError(error_msg)
         raise RuntimeError(f"claude CLI error: {error_msg}")
 
     # 成功したらセッションIDを記録
@@ -122,7 +155,12 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     with lock:
         try:
             logger.info("user message", extra={"channel": channel, "thread_ts": thread_ts, "text": text})
-            response = run_claude(text, thread_ts)
+            try:
+                response = run_claude(text, thread_ts)
+            except SessionResumeError:
+                logger.warning("session resume failed, rebuilding from thread history", extra={"channel": channel, "thread_ts": thread_ts})
+                history = fetch_thread_history(client, channel, thread_ts)
+                response = run_claude(text, thread_ts, conversation_context=history)
             if not response:
                 response = "応答を生成できませんでした。"
             logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
