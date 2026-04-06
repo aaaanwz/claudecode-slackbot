@@ -3,24 +3,19 @@ import os
 import re
 import subprocess
 import threading
-import time
 import uuid
 
 from dotenv import load_dotenv
-from pythonjsonlogger.json import JsonFormatter
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
-log_handler = logging.StreamHandler()
-formatter = JsonFormatter(
-    "%(asctime)s.%(msecs)03dZ %(levelname)s %(message)s",
-    datefmt="%Y-%m-%dT%H:%M:%S",
-    rename_fields={"asctime": "time", "levelname": "severity"},
+logging.basicConfig(
+    level=logging.WARNING,
+    format="%(asctime)s %(levelname)s %(message)s",
+    datefmt="%H:%M:%S",
 )
-formatter.converter = time.gmtime
-log_handler.setFormatter(formatter)
-logging.basicConfig(level=logging.INFO, handlers=[log_handler])
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 load_dotenv()
 
@@ -33,17 +28,15 @@ app = App(token=os.environ["SLACK_BOT_TOKEN"])
 @app.middleware
 def log_request(body, next):
     event = body.get("event", {})
-    logger.info(
-        "incoming event",
-        extra={
-            "type": event.get("type"),
-            "subtype": event.get("subtype"),
-            "user": event.get("user"),
-            "channel": event.get("channel"),
-            "thread_ts": event.get("thread_ts"),
-            "text": (event.get("text", "") or "")[:100],
-        },
-    )
+    etype = event.get("type", "")
+    subtype = event.get("subtype")
+    if subtype:
+        etype = f"{etype}({subtype})"
+    user = event.get("user", "?")
+    ch = event.get("channel", "?")
+    ts = event.get("thread_ts", event.get("ts", ""))
+    text = (event.get("text", "") or "")[:80]
+    logger.info("[slack] %s user=%s ch=%s ts=%s | %s", etype, user, ch, ts, text)
     next()
 
 BOT_USER_ID = None
@@ -137,6 +130,9 @@ def run_claude(prompt, thread_ts, conversation_context=None):
             )
         cmd = ["claude", "-p", "--session-id", session_id, full_prompt]
 
+    mode = "resume" if is_resume else "new"
+    logger.info("[claude] >>> %s session=%s prompt=%s", mode, session_id, prompt[:120])
+
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -150,14 +146,17 @@ def run_claude(prompt, thread_ts, conversation_context=None):
             if result.stderr
             else f"claude exited with code {result.returncode}"
         )
+        logger.error("[claude] <<< error (code=%d): %s", result.returncode, error_msg[:200])
         if is_resume:
             thread_session_ids.pop(thread_ts, None)
             raise SessionResumeError(error_msg)
         raise RuntimeError(f"claude CLI error: {error_msg}")
 
+    output = result.stdout.strip()
+    logger.info("[claude] <<< %d chars | %s", len(output), output[:120])
     # 成功したらセッションIDを記録
     thread_session_ids[thread_ts] = session_id
-    return result.stdout.strip()
+    return output
 
 
 def post_response(text, channel, thread_ts, event_ts, say, client):
@@ -171,21 +170,19 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     lock = get_thread_lock(thread_ts)
     with lock:
         try:
-            logger.info("user message", extra={"channel": channel, "thread_ts": thread_ts, "text": text})
             if thread_ts not in thread_session_ids:
-                logger.info("rebuilding from thread history", extra={"channel": channel, "thread_ts": thread_ts})
+                logger.info("[claude] rebuilding from thread history ts=%s", thread_ts)
                 history = fetch_thread_history(client, channel, thread_ts)
                 response = run_claude(text, thread_ts, conversation_context=history)
             else:
                 try:
                     response = run_claude(text, thread_ts)
                 except SessionResumeError:
-                    logger.warning("session resume failed, rebuilding from thread history", extra={"channel": channel, "thread_ts": thread_ts})
+                    logger.warning("[claude] session resume failed, rebuilding ts=%s", thread_ts)
                     history = fetch_thread_history(client, channel, thread_ts)
                     response = run_claude(text, thread_ts, conversation_context=history)
             if not response:
                 response = "応答を生成できませんでした。"
-            logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
             for chunk in split_markdown(response):
                 say(
                     blocks=[{"type": "markdown", "text": chunk}],
@@ -193,10 +190,10 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
                     thread_ts=thread_ts,
                 )
         except subprocess.TimeoutExpired:
-            logger.error("timeout", extra={"channel": channel, "thread_ts": thread_ts})
+            logger.error("[claude] timeout after %ds ts=%s", CLAUDE_TIMEOUT, thread_ts)
             say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
         except Exception:
-            logger.exception("error", extra={"channel": channel, "thread_ts": thread_ts})
+            logger.exception("[error] ts=%s", thread_ts)
             say(text="エラーが発生しました。", thread_ts=thread_ts)
         finally:
             try:
@@ -277,6 +274,6 @@ def handle_message(event, say, client):
 
 if __name__ == "__main__":
     BOT_USER_ID = app.client.auth_test()["user_id"]
-    logger.info("Bot started", extra={"bot_user_id": BOT_USER_ID})
+    logger.info("Bot started (user_id=%s)", BOT_USER_ID)
     socket_handler = SocketModeHandler(app, os.environ["SLACK_APP_TOKEN"])
     socket_handler.start()
