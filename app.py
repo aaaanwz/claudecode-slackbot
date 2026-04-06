@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 load_dotenv()
 
 CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
+CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
@@ -172,7 +173,7 @@ def run_claude(prompt, thread_ts):
         cmd,
         capture_output=True,
         text=True,
-        timeout=300,
+        timeout=CLAUDE_TIMEOUT,
         cwd=CLAUDE_WORKING_DIR,
     )
     if result.returncode != 0:
@@ -210,7 +211,7 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
             say(text=response, thread_ts=thread_ts)
         except subprocess.TimeoutExpired:
             logger.error("timeout", extra={"channel": channel, "thread_ts": thread_ts})
-            say(text="タイムアウトしました（5分）。", thread_ts=thread_ts)
+            say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
         except Exception:
             logger.exception("error", extra={"channel": channel, "thread_ts": thread_ts})
             say(text="エラーが発生しました。", thread_ts=thread_ts)
