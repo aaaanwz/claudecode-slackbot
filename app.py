@@ -29,6 +29,23 @@ CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
+
+@app.middleware
+def log_request(body, next):
+    event = body.get("event", {})
+    logger.info(
+        "incoming event",
+        extra={
+            "type": event.get("type"),
+            "subtype": event.get("subtype"),
+            "user": event.get("user"),
+            "channel": event.get("channel"),
+            "thread_ts": event.get("thread_ts"),
+            "text": (event.get("text", "") or "")[:100],
+        },
+    )
+    next()
+
 BOT_USER_ID = None
 
 active_sessions = set()
@@ -155,12 +172,17 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     with lock:
         try:
             logger.info("user message", extra={"channel": channel, "thread_ts": thread_ts, "text": text})
-            try:
-                response = run_claude(text, thread_ts)
-            except SessionResumeError:
-                logger.warning("session resume failed, rebuilding from thread history", extra={"channel": channel, "thread_ts": thread_ts})
+            if thread_ts not in thread_session_ids:
+                logger.info("rebuilding from thread history", extra={"channel": channel, "thread_ts": thread_ts})
                 history = fetch_thread_history(client, channel, thread_ts)
                 response = run_claude(text, thread_ts, conversation_context=history)
+            else:
+                try:
+                    response = run_claude(text, thread_ts)
+                except SessionResumeError:
+                    logger.warning("session resume failed, rebuilding from thread history", extra={"channel": channel, "thread_ts": thread_ts})
+                    history = fetch_thread_history(client, channel, thread_ts)
+                    response = run_claude(text, thread_ts, conversation_context=history)
             if not response:
                 response = "応答を生成できませんでした。"
             logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
@@ -207,6 +229,11 @@ def handle_mention(event, say, client):
     ).start()
 
 
+def bot_has_replied(messages):
+    """メッセージ一覧にBotの投稿が含まれているか判定する。"""
+    return any(msg.get("user") == BOT_USER_ID for msg in messages)
+
+
 @app.event("message")
 def handle_message(event, say, client):
     thread_ts = event.get("thread_ts")
@@ -221,8 +248,19 @@ def handle_message(event, say, client):
         return
 
     with sessions_lock:
-        if thread_ts not in active_sessions:
+        is_active = thread_ts in active_sessions
+
+    if not is_active:
+        try:
+            resp = client.conversations_replies(
+                channel=event["channel"], ts=thread_ts, limit=100
+            )
+        except Exception:
             return
+        if not bot_has_replied(resp.get("messages", [])):
+            return
+        with sessions_lock:
+            active_sessions.add(thread_ts)
 
     text = strip_mention(text)
     if not text:
