@@ -102,6 +102,24 @@ sudo systemctl status claudecode-slackbot
 sudo journalctl -u claudecode-slackbot -f
 ```
 
+## セッションログをGCSにバックアップする (オプション)
+
+Claude Codeのセッションログ（`~/.claude/projects/` 配下のJSONL）をGCSに定期バックアップする。
+
+### 1. GCSバケットを作成する
+
+```bash
+gsutil mb -l asia-northeast1 gs://your-bucket-name/
+```
+
+### 2. cronで定期同期を設定する
+
+`crontab -e` で以下を追加する（毎時同期の例）:
+
+```cron
+0 * * * * /usr/bin/gsutil -m rsync -r ~/.claude/projects/ gs://your-bucket-name/claude-code-logs/
+```
+
 ## コードを更新した場合
 
 ```bash
