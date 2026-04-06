@@ -102,6 +102,14 @@ sudo systemctl status claudecode-slackbot
 sudo journalctl -u claudecode-slackbot -f
 ```
 
+## コードを更新した場合
+
+```bash
+cd /path/to/claudecode-slackbot
+git pull
+sudo systemctl restart claudecode-slackbot
+```
+
 ## 使い方
 
 1. Botをメンションしてメッセージを送信すると、Claude Codeのセッションが開始される
