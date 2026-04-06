@@ -207,6 +207,18 @@ def handle_mention(event, say, client):
     ).start()
 
 
+def is_bot_in_thread(client, channel, thread_ts):
+    """Botがスレッドに過去に投稿しているか確認する。"""
+    try:
+        resp = client.conversations_replies(channel=channel, ts=thread_ts, limit=100)
+        for msg in resp.get("messages", []):
+            if msg.get("user") == BOT_USER_ID:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 @app.event("message")
 def handle_message(event, say, client):
     thread_ts = event.get("thread_ts")
@@ -222,7 +234,10 @@ def handle_message(event, say, client):
 
     with sessions_lock:
         if thread_ts not in active_sessions:
-            return
+            if is_bot_in_thread(client, event["channel"], thread_ts):
+                active_sessions.add(thread_ts)
+            else:
+                return
 
     text = strip_mention(text)
     if not text:
