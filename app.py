@@ -77,86 +77,33 @@ def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
-def markdown_to_slack_mrkdwn(text):
-    """MarkdownテキストをSlackのmrkdwn形式に変換する"""
-    # コードブロックとインラインコードを保護（変換対象から除外）
-    protected = []
+MARKDOWN_BLOCK_MAX_LENGTH = 12000
 
-    def protect(match):
-        protected.append(match.group(0))
-        return f"\x00P{len(protected) - 1}\x00"
 
-    text = re.sub(r"```[\s\S]*?```", protect, text)
-    text = re.sub(r"`[^`]+`", protect, text)
+def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
+    """テキストをmax_length以下のチャンクに分割する。段落境界で分割を試みる。"""
+    if len(text) <= max_length:
+        return [text]
 
-    # Markdownテーブルをコードブロックに変換
-    lines = text.split("\n")
-    result = []
-    table_lines = []
-    in_table = False
+    chunks = []
+    while text:
+        if len(text) <= max_length:
+            chunks.append(text)
+            break
 
-    for line in lines:
-        stripped = line.strip()
-        if stripped.startswith("|") and stripped.endswith("|"):
-            if not in_table:
-                in_table = True
-                table_lines = []
-            # セパレーター行(|---|---|)はスキップ
-            if re.match(r"^\|[\s\-:|]+\|$", stripped):
-                continue
-            table_lines.append(stripped)
-        else:
-            if in_table:
-                result.append("```")
-                result.extend(table_lines)
-                result.append("```")
-                in_table = False
-            result.append(line)
+        # 段落境界（空行）で分割を試みる
+        split_pos = text.rfind("\n\n", 0, max_length)
+        if split_pos == -1:
+            # 行境界で分割を試みる
+            split_pos = text.rfind("\n", 0, max_length)
+        if split_pos == -1:
+            # どちらもなければmax_lengthで強制分割
+            split_pos = max_length
 
-    if in_table:
-        result.append("```")
-        result.extend(table_lines)
-        result.append("```")
+        chunks.append(text[:split_pos])
+        text = text[split_pos:].lstrip("\n")
 
-    text = "\n".join(result)
-
-    # 箇条書き: - item → • item
-    text = re.sub(r"^(\s*)[-*]\s+", lambda m: m.group(1) + "• ", text, flags=re.MULTILINE)
-
-    # リンク: [text](url) → <url|text>
-    text = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"<\2|\1>", text)
-
-    # Bold: **text** → *text*（先にプレースホルダーに退避）
-    bolds = []
-
-    def save_bold(match):
-        bolds.append(match.group(1))
-        return f"\x00B{len(bolds) - 1}\x00"
-
-    text = re.sub(r"\*\*(.+?)\*\*", save_bold, text)
-
-    # 見出し: ## heading → *heading*（boldと同じプレースホルダーで保護）
-    def save_heading(match):
-        bolds.append(match.group(1))
-        return f"\x00B{len(bolds) - 1}\x00"
-
-    text = re.sub(r"^#{1,6}\s+(.+)$", save_heading, text, flags=re.MULTILINE)
-
-    # Italic: *text* → _text_
-    text = re.sub(r"(?<!\w)\*(?!\s)(.+?)(?<!\s)\*(?!\w)", r"_\1_", text)
-
-    # Boldプレースホルダーを復元
-    for i, content in enumerate(bolds):
-        text = text.replace(f"\x00B{i}\x00", f"*{content}*")
-
-    # Strikethrough: ~~text~~ → ~text~
-    text = re.sub(r"~~(.+?)~~", r"~\1~", text)
-
-    # 保護したコードブロック・インラインコードを復元
-    for i, code in enumerate(protected):
-        text = text.replace(f"\x00P{i}\x00", code)
-
-    return text
+    return chunks
 
 
 def run_claude(prompt, thread_ts):
@@ -204,18 +151,13 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
             response = run_claude(text, thread_ts)
             if not response:
                 response = "応答を生成できませんでした。"
-            response = markdown_to_slack_mrkdwn(response)
             logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
-            if len(response) > 3900:
-                client.files_upload_v2(
-                    channel=channel,
+            for chunk in split_markdown(response):
+                say(
+                    blocks=[{"type": "markdown", "text": chunk}],
+                    text=chunk,
                     thread_ts=thread_ts,
-                    content=response,
-                    filename="response.txt",
-                    initial_comment="長文のため、ファイルとして添付します。",
                 )
-            else:
-                say(text=response, thread_ts=thread_ts)
         except subprocess.TimeoutExpired:
             logger.error("timeout", extra={"channel": channel, "thread_ts": thread_ts})
             say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
