@@ -205,10 +205,17 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
             if not response:
                 response = "応答を生成できませんでした。"
             response = markdown_to_slack_mrkdwn(response)
-            if len(response) > 3900:
-                response = response[:3900] + "\n\n... (truncated)"
             logger.info("assistant message", extra={"channel": channel, "thread_ts": thread_ts, "text": response})
-            say(text=response, thread_ts=thread_ts)
+            if len(response) > 3900:
+                client.files_upload_v2(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    content=response,
+                    filename="response.txt",
+                    initial_comment="長文のため、ファイルとして添付します。",
+                )
+            else:
+                say(text=response, thread_ts=thread_ts)
         except subprocess.TimeoutExpired:
             logger.error("timeout", extra={"channel": channel, "thread_ts": thread_ts})
             say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
