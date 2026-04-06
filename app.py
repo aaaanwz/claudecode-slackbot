@@ -37,8 +37,6 @@ sessions_lock = threading.Lock()
 thread_locks = {}
 thread_locks_lock = threading.Lock()
 
-SESSION_TTL = 3600  # 1時間でセッションを期限切れにする
-session_last_active = {}
 thread_session_ids = {}
 
 
@@ -47,30 +45,6 @@ def get_thread_lock(thread_ts):
         if thread_ts not in thread_locks:
             thread_locks[thread_ts] = threading.Lock()
         return thread_locks[thread_ts]
-
-
-def cleanup_expired_sessions():
-    """期限切れのセッションとロックを削除する。sessions_lockの外から呼ぶこと。"""
-    now = time.time()
-    with sessions_lock:
-        expired = [
-            ts
-            for ts, last in session_last_active.items()
-            if now - last > SESSION_TTL
-        ]
-        for ts in expired:
-            active_sessions.discard(ts)
-            session_last_active.pop(ts, None)
-            thread_session_ids.pop(ts, None)
-        # thread_locks_lockもsessions_lock内で取得する（ロック順序: sessions_lock → thread_locks_lock）
-        with thread_locks_lock:
-            for ts in expired:
-                thread_locks.pop(ts, None)
-
-
-def _touch_session(thread_ts):
-    """セッションの最終アクティブ時刻を更新する。sessions_lockを保持した状態で呼ぶこと。"""
-    session_last_active[thread_ts] = time.time()
 
 
 def strip_mention(text):
@@ -185,10 +159,8 @@ def handle_mention(event, say, client):
         say(text="メッセージを入力してください。", thread_ts=thread_ts)
         return
 
-    cleanup_expired_sessions()
     with sessions_lock:
         active_sessions.add(thread_ts)
-        _touch_session(thread_ts)
 
     threading.Thread(
         target=post_response,
@@ -213,7 +185,6 @@ def handle_message(event, say, client):
     with sessions_lock:
         if thread_ts not in active_sessions:
             return
-        _touch_session(thread_ts)
 
     text = strip_mention(text)
     if not text:
