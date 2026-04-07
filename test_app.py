@@ -188,40 +188,6 @@ class TestFindSessionIdFromMetadata:
         result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
         assert result == "new-session"
 
-    def test_returns_latest_session_id_across_pages(self):
-        client = MagicMock()
-        client.conversations_replies.side_effect = [
-            {
-                "messages": [
-                    {
-                        "user": "B1",
-                        "text": "old",
-                        "metadata": {
-                            "event_type": "claude_session",
-                            "event_payload": {"session_id": "page1-session"},
-                        },
-                    },
-                ],
-                "response_metadata": {"next_cursor": "cursor_abc"},
-            },
-            {
-                "messages": [
-                    {"user": "U1", "text": "hello"},
-                    {
-                        "user": "B1",
-                        "text": "new",
-                        "metadata": {
-                            "event_type": "claude_session",
-                            "event_payload": {"session_id": "page2-session"},
-                        },
-                    },
-                ],
-            },
-        ]
-        result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
-        assert result == "page2-session"
-        assert client.conversations_replies.call_count == 2
-
     def test_returns_none_when_no_metadata(self):
         client = MagicMock()
         client.conversations_replies.return_value = {
@@ -263,30 +229,25 @@ class TestPostResponse:
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
         mock_claude.assert_called_once_with("hello", "session1", resume=True)
-        # 砂時計リアクション追加・削除
         client.reactions_add.assert_called_once()
         client.reactions_remove.assert_called_once()
-        # resume時は「処理中です」メッセージを投稿しない
-        client.chat_postMessage.assert_not_called()
-        # 応答はsayで投稿
         say.assert_called_once()
         assert say.call_args[1]["text"] == "bot reply"
+        # 応答にメタデータが付与される
+        assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
+        assert say.call_args[1]["metadata"]["event_payload"]["session_id"] == "session1"
 
     @patch("app.run_claude", return_value="new reply")
-    def test_new_session_posts_pending_message(self, mock_claude):
+    def test_new_session_response(self, mock_claude):
         say = MagicMock()
         client = _make_client()
 
         app.post_response("hello", "C1", "ts_new", "ev1", say, client)
 
-        # 初回は「処理中です」メッセージを投稿
-        client.chat_postMessage.assert_called_once()
-        post_kwargs = client.chat_postMessage.call_args[1]
-        assert post_kwargs["text"] == "処理中です。しばらくお待ちください"
-        assert post_kwargs["metadata"]["event_type"] == "claude_session"
-        # 応答はsayで別メッセージとして投稿
         say.assert_called_once()
         assert say.call_args[1]["text"] == "new reply"
+        # 応答にメタデータが付与される
+        assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
 
     @patch("app.run_claude", return_value="resumed reply")
     def test_recovers_session_from_metadata(self, mock_claude):
@@ -310,8 +271,6 @@ class TestPostResponse:
 
         assert app.thread_session_ids["ts_recover"] == "recovered-id"
         mock_claude.assert_called_once_with("hello", "recovered-id", resume=True)
-        # メタデータから復元したのでresume扱い → 「処理中です」は投稿しない
-        client.chat_postMessage.assert_not_called()
 
     @patch("app.run_claude")
     def test_resume_failure_starts_new_session(self, mock_claude):
@@ -375,6 +334,10 @@ class TestPostResponse:
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
         assert say.call_count == 2
+        # 最初のチャンクにはメタデータなし
+        assert "metadata" not in say.call_args_list[0][1]
+        # 最後のチャンクにメタデータが付与される
+        assert say.call_args_list[1][1]["metadata"]["event_type"] == "claude_session"
 
 
 # --- handle_mention ---

@@ -56,45 +56,19 @@ def make_session_metadata(session_id):
     return {"event_type": SESSION_METADATA_TYPE, "event_payload": {"session_id": session_id}}
 
 
-METADATA_SCAN_MAX_PAGES = 10
-
-
 def find_session_id_from_metadata(client, channel, thread_ts):
-    """スレッド内のメタデータから最新のセッションIDを復元する。"""
-    latest_session_id = None
-    cursor = None
-    for page in range(METADATA_SCAN_MAX_PAGES):
-        params = {
-            "channel": channel,
-            "ts": thread_ts,
-            "limit": 100,
-            "include_all_metadata": True,
-        }
-        if cursor:
-            params["cursor"] = cursor
-
-        resp = client.conversations_replies(**params)
-        for msg in resp.get("messages", []):
-            metadata = msg.get("metadata", {})
-            if metadata.get("event_type") == SESSION_METADATA_TYPE:
-                session_id = metadata.get("event_payload", {}).get("session_id")
-                if session_id:
-                    latest_session_id = session_id
-
-        cursor = resp.get("response_metadata", {}).get("next_cursor")
-        if not cursor:
-            break
-    else:
-        if cursor:
-            logger.warning(
-                "[metadata] scan truncated at %d pages for thread ts=%s",
-                METADATA_SCAN_MAX_PAGES,
-                thread_ts,
-            )
-
-    if latest_session_id:
-        logger.info("[metadata] recovered session=%s from thread ts=%s", latest_session_id, thread_ts)
-    return latest_session_id
+    """スレッド内の最新メタデータからセッションIDを復元する。"""
+    resp = client.conversations_replies(
+        channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
+    )
+    for msg in reversed(resp.get("messages", [])):
+        metadata = msg.get("metadata", {})
+        if metadata.get("event_type") == SESSION_METADATA_TYPE:
+            session_id = metadata.get("event_payload", {}).get("session_id")
+            if session_id:
+                logger.info("[metadata] recovered session=%s from thread ts=%s", session_id, thread_ts)
+                return session_id
+    return None
 
 
 class SessionResumeError(Exception):
@@ -205,22 +179,6 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
 
             session_id = thread_session_ids[thread_ts]
 
-            # 初回のみメタデータ付き「処理中です」メッセージを投稿
-            if not should_resume:
-                try:
-                    client.chat_postMessage(
-                        channel=channel,
-                        thread_ts=thread_ts,
-                        text="処理中です。しばらくお待ちください",
-                        metadata=make_session_metadata(session_id),
-                    )
-                except Exception:
-                    logger.warning(
-                        "[slack] failed to post initial processing message ts=%s",
-                        thread_ts,
-                        exc_info=True,
-                    )
-
             if should_resume:
                 try:
                     response = run_claude(text, session_id, resume=True)
@@ -228,19 +186,6 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
                     logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
                     session_id = str(uuid.uuid4())
                     thread_session_ids[thread_ts] = session_id
-                    try:
-                        client.chat_postMessage(
-                            channel=channel,
-                            thread_ts=thread_ts,
-                            text="処理中です。しばらくお待ちください",
-                            metadata=make_session_metadata(session_id),
-                        )
-                    except Exception:
-                        logger.warning(
-                            "[slack] failed to post processing message on resume fallback ts=%s",
-                            thread_ts,
-                            exc_info=True,
-                        )
                     response = run_claude(text, session_id)
             else:
                 response = run_claude(text, session_id)
@@ -248,12 +193,16 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
             if not response:
                 response = "応答を生成できませんでした。"
 
-            for chunk in split_markdown(response):
-                say(
-                    blocks=[{"type": "markdown", "text": chunk}],
-                    text=chunk,
-                    thread_ts=thread_ts,
-                )
+            chunks = split_markdown(response)
+            for i, chunk in enumerate(chunks):
+                kwargs = {
+                    "blocks": [{"type": "markdown", "text": chunk}],
+                    "text": chunk,
+                    "thread_ts": thread_ts,
+                }
+                if i == len(chunks) - 1:
+                    kwargs["metadata"] = make_session_metadata(session_id)
+                say(**kwargs)
         except subprocess.TimeoutExpired:
             logger.error("[claude] timeout after %ds ts=%s", CLAUDE_TIMEOUT, thread_ts)
             say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
