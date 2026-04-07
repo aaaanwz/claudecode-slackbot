@@ -1,6 +1,6 @@
 import subprocess
 import threading
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -92,45 +92,47 @@ class TestBotHasReplied:
 # --- run_claude ---
 
 
+def _make_popen_mock(returncode=0, stdout="", stderr=""):
+    """subprocess.Popenのモックを生成する。"""
+    mock_proc = MagicMock()
+    mock_proc.returncode = returncode
+    mock_proc.stdout.read.return_value = stdout
+    mock_proc.stderr.read.return_value = stderr
+    mock_proc.wait.return_value = returncode
+    return mock_proc
+
+
 class TestRunClaude:
-    @patch("app.subprocess.run")
-    def test_new_session(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="response text", stderr=""
-        )
+    @patch("app.subprocess.Popen")
+    def test_new_session(self, mock_popen):
+        mock_popen.return_value = _make_popen_mock(returncode=0, stdout="response text")
         result = app.run_claude("hello", "session-123")
         assert result == "response text"
 
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "claude"
         assert "--session-id" in cmd
         assert "session-123" in cmd
 
-    @patch("app.subprocess.run")
-    def test_resume_session(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="resumed response", stderr=""
-        )
+    @patch("app.subprocess.Popen")
+    def test_resume_session(self, mock_popen):
+        mock_popen.return_value = _make_popen_mock(returncode=0, stdout="resumed response")
         result = app.run_claude("follow up", "existing-session-id", resume=True)
         assert result == "resumed response"
 
-        cmd = mock_run.call_args[0][0]
+        cmd = mock_popen.call_args[0][0]
         assert "--resume" in cmd
         assert "existing-session-id" in cmd
 
-    @patch("app.subprocess.run")
-    def test_resume_failure_raises_session_resume_error(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="session not found"
-        )
+    @patch("app.subprocess.Popen")
+    def test_resume_failure_raises_session_resume_error(self, mock_popen):
+        mock_popen.return_value = _make_popen_mock(returncode=1, stderr="session not found")
         with pytest.raises(app.SessionResumeError):
             app.run_claude("hello", "bad-session", resume=True)
 
-    @patch("app.subprocess.run")
-    def test_new_session_failure_raises_runtime_error(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=1, stdout="", stderr="some error"
-        )
+    @patch("app.subprocess.Popen")
+    def test_new_session_failure_raises_runtime_error(self, mock_popen):
+        mock_popen.return_value = _make_popen_mock(returncode=1, stderr="some error")
         with pytest.raises(RuntimeError, match="claude CLI error"):
             app.run_claude("hello", "session-123")
 
@@ -228,7 +230,7 @@ class TestPostResponse:
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
-        mock_claude.assert_called_once_with("hello", "session1", resume=True)
+        mock_claude.assert_called_once_with("hello", "session1", resume=True, on_still_running=ANY)
         client.reactions_add.assert_called_once()
         client.reactions_remove.assert_called_once()
         say.assert_called_once()
@@ -270,7 +272,7 @@ class TestPostResponse:
         app.post_response("hello", "C1", "ts_recover", "ev1", say, client)
 
         assert app.thread_session_ids["ts_recover"] == "recovered-id"
-        mock_claude.assert_called_once_with("hello", "recovered-id", resume=True)
+        mock_claude.assert_called_once_with("hello", "recovered-id", resume=True, on_still_running=ANY)
 
     @patch("app.run_claude")
     def test_resume_failure_starts_new_session(self, mock_claude):

@@ -20,7 +20,8 @@ logger.setLevel(logging.INFO)
 load_dotenv()
 
 CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
-CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "600"))
+CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))
+CLAUDE_CHECK_INTERVAL = int(os.environ.get("CLAUDE_CHECK_INTERVAL", "300"))
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
@@ -115,7 +116,7 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
     return chunks
 
 
-def run_claude(prompt, session_id, resume=False):
+def run_claude(prompt, session_id, resume=False, on_still_running=None):
     if resume:
         cmd = ["claude", "-p", "--resume", session_id, prompt]
     else:
@@ -124,25 +125,54 @@ def run_claude(prompt, session_id, resume=False):
     mode = "resume" if resume else "new"
     logger.info("[claude] >>> %s session=%s prompt=%s", mode, session_id, prompt[:120])
 
-    result = subprocess.run(
+    proc = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=CLAUDE_TIMEOUT,
         cwd=CLAUDE_WORKING_DIR,
     )
-    if result.returncode != 0:
+
+    stdout_chunks = []
+    stderr_chunks = []
+    t_out = threading.Thread(target=lambda: stdout_chunks.append(proc.stdout.read()), daemon=True)
+    t_err = threading.Thread(target=lambda: stderr_chunks.append(proc.stderr.read()), daemon=True)
+    t_out.start()
+    t_err.start()
+
+    elapsed = 0
+    while True:
+        try:
+            proc.wait(timeout=CLAUDE_CHECK_INTERVAL)
+            break
+        except subprocess.TimeoutExpired:
+            elapsed += CLAUDE_CHECK_INTERVAL
+            if elapsed >= CLAUDE_TIMEOUT:
+                proc.kill()
+                t_out.join()
+                t_err.join()
+                raise subprocess.TimeoutExpired(cmd, CLAUDE_TIMEOUT)
+            if on_still_running:
+                on_still_running(elapsed)
+
+    t_out.join()
+    t_err.join()
+
+    stdout = stdout_chunks[0] if stdout_chunks else ""
+    stderr = stderr_chunks[0] if stderr_chunks else ""
+
+    if proc.returncode != 0:
         error_msg = (
-            result.stderr.strip()
-            if result.stderr
-            else f"claude exited with code {result.returncode}"
+            stderr.strip()
+            if stderr
+            else f"claude exited with code {proc.returncode}"
         )
-        logger.error("[claude] <<< error (code=%d): %s", result.returncode, error_msg[:200])
+        logger.error("[claude] <<< error (code=%d): %s", proc.returncode, error_msg[:200])
         if resume:
             raise SessionResumeError(error_msg)
         raise RuntimeError(f"claude CLI error: {error_msg}")
 
-    output = result.stdout.strip()
+    output = stdout.strip()
     logger.info("[claude] <<< %d chars | %s", len(output), output[:120])
     return output
 
@@ -158,6 +188,10 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     lock = get_thread_lock(thread_ts)
     with lock:
         try:
+            def on_still_running(elapsed_seconds):
+                minutes = elapsed_seconds // 60
+                say(text=f"まだ処理中です… （経過: {minutes}分）", thread_ts=thread_ts)
+
             # セッションIDの復元/生成
             should_resume = thread_ts in thread_session_ids
             if not should_resume:
@@ -181,14 +215,14 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
 
             if should_resume:
                 try:
-                    response = run_claude(text, session_id, resume=True)
+                    response = run_claude(text, session_id, resume=True, on_still_running=on_still_running)
                 except SessionResumeError:
                     logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
                     session_id = str(uuid.uuid4())
                     thread_session_ids[thread_ts] = session_id
-                    response = run_claude(text, session_id)
+                    response = run_claude(text, session_id, on_still_running=on_still_running)
             else:
-                response = run_claude(text, session_id)
+                response = run_claude(text, session_id, on_still_running=on_still_running)
 
             if not response:
                 response = "応答を生成できませんでした。"
