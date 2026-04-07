@@ -2,8 +2,11 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import uuid
+
+import requests
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -85,6 +88,36 @@ def get_thread_lock(thread_ts):
 
 def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+
+
+def download_slack_files(files, token):
+    """Slackのファイルを/tmpにダウンロードし、保存先パスのリストを返す。"""
+    saved_paths = []
+    for f in files:
+        url = f.get("url_private_download")
+        if not url:
+            continue
+        name = f.get("name", "unknown")
+        try:
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+            resp.raise_for_status()
+            tmp_dir = tempfile.mkdtemp(prefix="slack_")
+            dest = os.path.join(tmp_dir, name)
+            with open(dest, "wb") as fp:
+                fp.write(resp.content)
+            saved_paths.append(dest)
+            logger.info("[file] downloaded %s -> %s (%d bytes)", name, dest, len(resp.content))
+        except Exception:
+            logger.warning("[file] failed to download %s", name, exc_info=True)
+    return saved_paths
+
+
+def build_prompt(text, file_paths):
+    """テキストとファイルパスからプロンプトを組み立てる。"""
+    if not file_paths:
+        return text
+    files_section = "\n".join(f"- {p}" for p in file_paths)
+    return f"{text}\n\n添付ファイル:\n{files_section}"
 
 
 MARKDOWN_BLOCK_MAX_LENGTH = 12000
@@ -260,16 +293,21 @@ def handle_mention(event, say, client):
     text = strip_mention(event.get("text", ""))
     channel = event["channel"]
 
-    if not text:
+    files = event.get("files", [])
+    file_paths = download_slack_files(files, os.environ["SLACK_BOT_TOKEN"]) if files else []
+
+    if not text and not file_paths:
         say(text="メッセージを入力してください。", thread_ts=thread_ts)
         return
+
+    prompt = build_prompt(text, file_paths)
 
     with sessions_lock:
         active_sessions.add(thread_ts)
 
     threading.Thread(
         target=post_response,
-        args=(text, channel, thread_ts, event["ts"], say, client),
+        args=(prompt, channel, thread_ts, event["ts"], say, client),
         daemon=True,
     ).start()
 
@@ -308,14 +346,18 @@ def handle_message(event, say, client):
             active_sessions.add(thread_ts)
 
     text = strip_mention(text)
-    if not text:
+    files = event.get("files", [])
+    file_paths = download_slack_files(files, os.environ["SLACK_BOT_TOKEN"]) if files else []
+
+    if not text and not file_paths:
         return
 
+    prompt = build_prompt(text, file_paths)
     channel = event["channel"]
 
     threading.Thread(
         target=post_response,
-        args=(text, channel, thread_ts, event["ts"], say, client),
+        args=(prompt, channel, thread_ts, event["ts"], say, client),
         daemon=True,
     ).start()
 

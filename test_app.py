@@ -1,3 +1,4 @@
+import os
 import subprocess
 import threading
 from unittest.mock import ANY, MagicMock, patch
@@ -5,6 +6,81 @@ from unittest.mock import ANY, MagicMock, patch
 import pytest
 
 import app
+
+
+# --- download_slack_files ---
+
+
+class TestDownloadSlackFiles:
+    @patch("app.requests.get")
+    def test_downloads_file(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.content = b"file content"
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        files = [{"url_private_download": "https://files.slack.com/abc", "name": "test.txt"}]
+        paths = app.download_slack_files(files, "xoxb-token")
+
+        assert len(paths) == 1
+        assert paths[0].endswith("test.txt")
+        assert os.path.exists(paths[0])
+        with open(paths[0], "rb") as f:
+            assert f.read() == b"file content"
+        mock_get.assert_called_once_with(
+            "https://files.slack.com/abc",
+            headers={"Authorization": "Bearer xoxb-token"},
+            timeout=60,
+        )
+
+    @patch("app.requests.get")
+    def test_skips_file_without_url(self, mock_get):
+        files = [{"name": "test.txt"}]
+        paths = app.download_slack_files(files, "xoxb-token")
+
+        assert paths == []
+        mock_get.assert_not_called()
+
+    @patch("app.requests.get", side_effect=Exception("network error"))
+    def test_handles_download_error(self, mock_get):
+        files = [{"url_private_download": "https://files.slack.com/abc", "name": "test.txt"}]
+        paths = app.download_slack_files(files, "xoxb-token")
+
+        assert paths == []
+
+    @patch("app.requests.get")
+    def test_downloads_multiple_files(self, mock_get):
+        mock_resp = MagicMock()
+        mock_resp.content = b"data"
+        mock_resp.raise_for_status.return_value = None
+        mock_get.return_value = mock_resp
+
+        files = [
+            {"url_private_download": "https://files.slack.com/a", "name": "a.txt"},
+            {"url_private_download": "https://files.slack.com/b", "name": "b.txt"},
+        ]
+        paths = app.download_slack_files(files, "xoxb-token")
+
+        assert len(paths) == 2
+
+
+# --- build_prompt ---
+
+
+class TestBuildPrompt:
+    def test_no_files(self):
+        assert app.build_prompt("hello", []) == "hello"
+
+    def test_with_files(self):
+        result = app.build_prompt("analyze this", ["/tmp/a.txt", "/tmp/b.png"])
+        assert "analyze this" in result
+        assert "/tmp/a.txt" in result
+        assert "/tmp/b.png" in result
+        assert "添付ファイル" in result
+
+    def test_empty_text_with_files(self):
+        result = app.build_prompt("", ["/tmp/a.txt"])
+        assert "/tmp/a.txt" in result
 
 
 # --- strip_mention ---
@@ -394,6 +470,45 @@ class TestHandleMention:
 
         assert "1000" in app.active_sessions
 
+    @patch("app.download_slack_files", return_value=["/tmp/slack_xxx/test.png"])
+    @patch("app.threading.Thread")
+    def test_includes_files_in_prompt(self, mock_thread_cls, mock_download):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        event = {
+            "text": "<@BOT> この画像を見て",
+            "ts": "1234",
+            "channel": "C1",
+            "files": [{"url_private_download": "https://files.slack.com/a", "name": "test.png"}],
+        }
+
+        app.handle_mention(event, say, client)
+
+        args = mock_thread_cls.call_args[1]["args"]
+        prompt = args[0]
+        assert "/tmp/slack_xxx/test.png" in prompt
+        assert "添付ファイル" in prompt
+
+    @patch("app.download_slack_files", return_value=["/tmp/slack_xxx/test.png"])
+    @patch("app.threading.Thread")
+    def test_file_only_without_text(self, mock_thread_cls, mock_download):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        event = {
+            "text": "<@BOT>",
+            "ts": "1234",
+            "channel": "C1",
+            "files": [{"url_private_download": "https://files.slack.com/a", "name": "test.png"}],
+        }
+
+        app.handle_mention(event, say, client)
+
+        mock_thread.start.assert_called_once()
+
 
 # --- handle_message ---
 
@@ -536,6 +651,48 @@ class TestHandleMessage:
         with patch("app.threading.Thread") as mock_thread_cls:
             app.handle_message(event, say, client)
             mock_thread_cls.assert_not_called()
+
+    @patch("app.download_slack_files", return_value=["/tmp/slack_xxx/doc.pdf"])
+    @patch("app.threading.Thread")
+    def test_includes_files_in_prompt(self, mock_thread_cls, mock_download):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        app.active_sessions.add("1000")
+        event = {
+            "text": "このファイルを確認して",
+            "ts": "1234",
+            "thread_ts": "1000",
+            "channel": "C1",
+            "files": [{"url_private_download": "https://files.slack.com/a", "name": "doc.pdf"}],
+        }
+
+        app.handle_message(event, say, client)
+
+        args = mock_thread_cls.call_args[1]["args"]
+        prompt = args[0]
+        assert "/tmp/slack_xxx/doc.pdf" in prompt
+
+    @patch("app.download_slack_files", return_value=["/tmp/slack_xxx/img.png"])
+    @patch("app.threading.Thread")
+    def test_file_only_without_text_in_thread(self, mock_thread_cls, mock_download):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        app.active_sessions.add("1000")
+        event = {
+            "text": "",
+            "ts": "1234",
+            "thread_ts": "1000",
+            "channel": "C1",
+            "files": [{"url_private_download": "https://files.slack.com/a", "name": "img.png"}],
+        }
+
+        app.handle_message(event, say, client)
+
+        mock_thread.start.assert_called_once()
 
 
 # --- get_thread_lock ---
