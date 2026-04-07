@@ -58,18 +58,30 @@ def make_session_metadata(session_id):
 
 def find_session_id_from_metadata(client, channel, thread_ts):
     """スレッド内のメタデータから最新のセッションIDを復元する。"""
-    resp = client.conversations_replies(
-        channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
-    )
-    messages = resp.get("messages", [])
-    for msg in reversed(messages):
-        metadata = msg.get("metadata", {})
-        if metadata.get("event_type") == SESSION_METADATA_TYPE:
-            session_id = metadata.get("event_payload", {}).get("session_id")
-            if session_id:
-                logger.info("[metadata] recovered session=%s from thread ts=%s", session_id, thread_ts)
-                return session_id
-    return None
+    cursor = None
+    while True:
+        params = {
+            "channel": channel,
+            "ts": thread_ts,
+            "limit": 100,
+            "include_all_metadata": True,
+        }
+        if cursor:
+            params["cursor"] = cursor
+
+        resp = client.conversations_replies(**params)
+        messages = resp.get("messages", [])
+        for msg in reversed(messages):
+            metadata = msg.get("metadata", {})
+            if metadata.get("event_type") == SESSION_METADATA_TYPE:
+                session_id = metadata.get("event_payload", {}).get("session_id")
+                if session_id:
+                    logger.info("[metadata] recovered session=%s from thread ts=%s", session_id, thread_ts)
+                    return session_id
+
+        cursor = resp.get("response_metadata", {}).get("next_cursor")
+        if not cursor:
+            return None
 
 
 class SessionResumeError(Exception):
@@ -170,16 +182,16 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
 
         session_id = thread_session_ids[thread_ts]
 
-        # 初回のみメタデータ付き「処理中です」メッセージを投稿
-        if not should_resume:
-            client.chat_postMessage(
-                channel=channel,
-                thread_ts=thread_ts,
-                text="処理中です。しばらくお待ちください",
-                metadata=make_session_metadata(session_id),
-            )
-
         try:
+            # 初回のみメタデータ付き「処理中です」メッセージを投稿
+            if not should_resume:
+                client.chat_postMessage(
+                    channel=channel,
+                    thread_ts=thread_ts,
+                    text="処理中です。しばらくお待ちください",
+                    metadata=make_session_metadata(session_id),
+                )
+
             if should_resume:
                 try:
                     response = run_claude(text, session_id, resume=True)
@@ -187,6 +199,12 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
                     logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
                     session_id = str(uuid.uuid4())
                     thread_session_ids[thread_ts] = session_id
+                    client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text="処理中です。しばらくお待ちください",
+                        metadata=make_session_metadata(session_id),
+                    )
                     response = run_claude(text, session_id)
             else:
                 response = run_claude(text, session_id)
