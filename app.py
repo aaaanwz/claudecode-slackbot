@@ -2,8 +2,11 @@ import logging
 import os
 import re
 import subprocess
+import tempfile
 import threading
 import uuid
+
+import requests
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -63,6 +66,37 @@ def get_thread_lock(thread_ts):
 
 def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+
+
+def download_slack_files(files, token):
+    """Slackの添付ファイルを/tmpにダウンロードし、ファイルパスのリストを返す。"""
+    saved_paths = []
+    for f in files:
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            continue
+        name = f.get("name", "attachment")
+        try:
+            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
+            resp.raise_for_status()
+            # 一意なディレクトリに保存してファイル名の衝突を避ける
+            tmpdir = tempfile.mkdtemp(prefix="slack_")
+            path = os.path.join(tmpdir, name)
+            with open(path, "wb") as fp:
+                fp.write(resp.content)
+            saved_paths.append(path)
+            logger.info("[file] downloaded %s (%d bytes) -> %s", name, len(resp.content), path)
+        except Exception:
+            logger.exception("[file] failed to download %s", name)
+    return saved_paths
+
+
+def build_prompt_with_files(text, file_paths):
+    """テキストにファイルパス情報を付加したプロンプトを構築する。"""
+    if not file_paths:
+        return text
+    files_section = "\n".join(f"- {p}" for p in file_paths)
+    return f"{text}\n\n添付ファイル:\n{files_section}"
 
 
 MARKDOWN_BLOCK_MAX_LENGTH = 12000
@@ -212,6 +246,12 @@ def handle_mention(event, say, client):
     text = strip_mention(event.get("text", ""))
     channel = event["channel"]
 
+    # 添付ファイルのダウンロード
+    file_paths = []
+    if event.get("files"):
+        file_paths = download_slack_files(event["files"], os.environ["SLACK_BOT_TOKEN"])
+    text = build_prompt_with_files(text, file_paths)
+
     if not text:
         say(text="メッセージを入力してください。", thread_ts=thread_ts)
         return
@@ -260,6 +300,13 @@ def handle_message(event, say, client):
             active_sessions.add(thread_ts)
 
     text = strip_mention(text)
+
+    # 添付ファイルのダウンロード
+    file_paths = []
+    if event.get("files"):
+        file_paths = download_slack_files(event["files"], os.environ["SLACK_BOT_TOKEN"])
+    text = build_prompt_with_files(text, file_paths)
+
     if not text:
         return
 
