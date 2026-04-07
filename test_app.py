@@ -1,6 +1,6 @@
 import subprocess
 import threading
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -89,69 +89,29 @@ class TestBotHasReplied:
         assert app.bot_has_replied([]) is False
 
 
-# --- fetch_thread_history ---
-
-
-class TestFetchThreadHistory:
-    def test_builds_context(self):
-        client = MagicMock()
-        client.conversations_replies.return_value = {
-            "messages": [
-                {"user": "U1", "text": "<@BOT> question?"},
-                {"user": "B1", "bot_id": "B1", "text": "answer"},
-                {"user": "U1", "text": "thanks"},
-            ]
-        }
-        result = app.fetch_thread_history(client, "C1", "1234.5678")
-        assert "[user]\nquestion?" in result
-        assert "[assistant]\nanswer" in result
-        assert "[user]\nthanks" in result
-
-    def test_skips_subtype_messages(self):
-        client = MagicMock()
-        client.conversations_replies.return_value = {
-            "messages": [
-                {"user": "U1", "text": "hello"},
-                {"user": "U1", "text": "joined", "subtype": "channel_join"},
-            ]
-        }
-        result = app.fetch_thread_history(client, "C1", "1234.5678")
-        assert "joined" not in result
-        assert "[user]\nhello" in result
-
-
 # --- run_claude ---
 
 
 class TestRunClaude:
-    def setup_method(self):
-        self._sessions = app.thread_session_ids.copy()
-        app.thread_session_ids.clear()
-
-    def teardown_method(self):
-        app.thread_session_ids.clear()
-        app.thread_session_ids.update(self._sessions)
-
     @patch("app.subprocess.run")
     def test_new_session(self, mock_run):
         mock_run.return_value = MagicMock(
             returncode=0, stdout="response text", stderr=""
         )
-        result = app.run_claude("hello", "ts1")
+        result = app.run_claude("hello", "session-123")
         assert result == "response text"
-        assert "ts1" in app.thread_session_ids
 
         cmd = mock_run.call_args[0][0]
         assert cmd[0] == "claude"
         assert "--session-id" in cmd
+        assert "session-123" in cmd
 
     @patch("app.subprocess.run")
     def test_resume_session(self, mock_run):
-        app.thread_session_ids["ts1"] = "existing-session-id"
         mock_run.return_value = MagicMock(
             returncode=0, stdout="resumed response", stderr=""
         )
-        result = app.run_claude("follow up", "ts1")
+        result = app.run_claude("follow up", "existing-session-id", resume=True)
         assert result == "resumed response"
 
         cmd = mock_run.call_args[0][0]
@@ -160,14 +120,11 @@ class TestRunClaude:
 
     @patch("app.subprocess.run")
     def test_resume_failure_raises_session_resume_error(self, mock_run):
-        app.thread_session_ids["ts1"] = "bad-session"
         mock_run.return_value = MagicMock(
             returncode=1, stdout="", stderr="session not found"
         )
         with pytest.raises(app.SessionResumeError):
-            app.run_claude("hello", "ts1")
-        # セッションIDがクリアされる
-        assert "ts1" not in app.thread_session_ids
+            app.run_claude("hello", "bad-session", resume=True)
 
     @patch("app.subprocess.run")
     def test_new_session_failure_raises_runtime_error(self, mock_run):
@@ -175,25 +132,79 @@ class TestRunClaude:
             returncode=1, stdout="", stderr="some error"
         )
         with pytest.raises(RuntimeError, match="claude CLI error"):
-            app.run_claude("hello", "ts_new")
+            app.run_claude("hello", "session-123")
 
-    @patch("app.subprocess.run")
-    def test_conversation_context(self, mock_run):
-        mock_run.return_value = MagicMock(
-            returncode=0, stdout="contextual response", stderr=""
+
+# --- find_session_id_from_metadata ---
+
+
+class TestFindSessionIdFromMetadata:
+    def test_finds_session_id(self):
+        client = MagicMock()
+        client.conversations_replies.return_value = {
+            "messages": [
+                {"user": "U1", "text": "hello"},
+                {
+                    "user": "B1",
+                    "bot_id": "B1",
+                    "text": "response",
+                    "metadata": {
+                        "event_type": "claude_session",
+                        "event_payload": {"session_id": "found-session"},
+                    },
+                },
+            ]
+        }
+        result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
+        assert result == "found-session"
+        client.conversations_replies.assert_called_once_with(
+            channel="C1", ts="1234.5678", limit=100, include_all_metadata=True
         )
-        result = app.run_claude("hello", "ts1", conversation_context="[user]\nhi")
-        assert result == "contextual response"
 
-        cmd = mock_run.call_args[0][0]
-        # conversation_context使用時は--session-id（新規）
-        assert "--session-id" in cmd
-        # プロンプトにコンテキストが含まれる
-        prompt_arg = cmd[-1]
-        assert "会話履歴" in prompt_arg
+    def test_returns_latest_session_id(self):
+        client = MagicMock()
+        client.conversations_replies.return_value = {
+            "messages": [
+                {
+                    "user": "B1",
+                    "bot_id": "B1",
+                    "text": "old",
+                    "metadata": {
+                        "event_type": "claude_session",
+                        "event_payload": {"session_id": "old-session"},
+                    },
+                },
+                {
+                    "user": "B1",
+                    "bot_id": "B1",
+                    "text": "new",
+                    "metadata": {
+                        "event_type": "claude_session",
+                        "event_payload": {"session_id": "new-session"},
+                    },
+                },
+            ]
+        }
+        result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
+        assert result == "new-session"
+
+    def test_returns_none_when_no_metadata(self):
+        client = MagicMock()
+        client.conversations_replies.return_value = {
+            "messages": [{"user": "U1", "text": "hello"}]
+        }
+        result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
+        assert result is None
 
 
 # --- post_response ---
+
+
+def _make_client():
+    """テスト用のSlackクライアントモックを作成する。"""
+    client = MagicMock()
+    client.conversations_replies.return_value = {"messages": []}
+    return client
 
 
 class TestPostResponse:
@@ -210,91 +221,123 @@ class TestPostResponse:
         app.thread_locks.update(self._locks)
 
     @patch("app.run_claude", return_value="bot reply")
-    def test_normal_response(self, mock_claude):
+    def test_resume_response(self, mock_claude):
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
-        mock_claude.assert_called_once_with("hello", "ts1")
-        say.assert_called_once()
-        assert say.call_args[1]["thread_ts"] == "ts1"
-        # リアクション追加・削除
+        mock_claude.assert_called_once_with("hello", "session1", resume=True)
         client.reactions_add.assert_called_once()
         client.reactions_remove.assert_called_once()
+        say.assert_called_once()
+        assert say.call_args[1]["text"] == "bot reply"
+        # 応答にメタデータが付与される
+        assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
+        assert say.call_args[1]["metadata"]["event_payload"]["session_id"] == "session1"
 
-    @patch("app.run_claude", return_value="rebuilt reply")
-    @patch("app.fetch_thread_history", return_value="[user]\nhi")
-    def test_rebuilds_when_no_session(self, mock_history, mock_claude):
+    @patch("app.run_claude", return_value="new reply")
+    def test_new_session_response(self, mock_claude):
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
 
         app.post_response("hello", "C1", "ts_new", "ev1", say, client)
 
-        mock_history.assert_called_once()
-        mock_claude.assert_called_once_with(
-            "hello", "ts_new", conversation_context="[user]\nhi"
-        )
+        say.assert_called_once()
+        assert say.call_args[1]["text"] == "new reply"
+        # 応答にメタデータが付与される
+        assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
+
+    @patch("app.run_claude", return_value="resumed reply")
+    def test_recovers_session_from_metadata(self, mock_claude):
+        say = MagicMock()
+        client = _make_client()
+        client.conversations_replies.return_value = {
+            "messages": [
+                {
+                    "user": "B1",
+                    "bot_id": "B1",
+                    "text": "prev response",
+                    "metadata": {
+                        "event_type": "claude_session",
+                        "event_payload": {"session_id": "recovered-id"},
+                    },
+                },
+            ]
+        }
+
+        app.post_response("hello", "C1", "ts_recover", "ev1", say, client)
+
+        assert app.thread_session_ids["ts_recover"] == "recovered-id"
+        mock_claude.assert_called_once_with("hello", "recovered-id", resume=True)
 
     @patch("app.run_claude")
-    @patch("app.fetch_thread_history", return_value="[user]\nhi")
-    def test_resume_failure_triggers_rebuild(self, mock_history, mock_claude):
+    def test_resume_failure_starts_new_session(self, mock_claude):
         mock_claude.side_effect = [
             app.SessionResumeError("fail"),
-            "recovered reply",
+            "new reply",
         ]
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
         assert mock_claude.call_count == 2
-        mock_history.assert_called_once()
+        first_call = mock_claude.call_args_list[0]
+        assert first_call[1].get("resume") is True
+        second_call = mock_claude.call_args_list[1]
+        assert second_call[0][1] != "session1"
+        assert second_call[1].get("resume", False) is False
 
     @patch("app.run_claude", side_effect=subprocess.TimeoutExpired("claude", 600))
     def test_timeout(self, mock_claude):
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
         say.assert_called_once()
         assert "タイムアウト" in say.call_args[1]["text"]
+        client.reactions_remove.assert_called_once()
 
     @patch("app.run_claude", side_effect=RuntimeError("unexpected"))
     def test_generic_error(self, mock_claude):
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
         say.assert_called_once()
         assert "エラー" in say.call_args[1]["text"]
+        client.reactions_remove.assert_called_once()
 
     @patch("app.run_claude", return_value="")
     def test_empty_response_fallback(self, mock_claude):
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
-        say_text = say.call_args[1]["text"]
-        assert "応答を生成できませんでした" in say_text
+        assert "応答を生成できませんでした" in say.call_args[1]["text"]
 
     @patch("app.run_claude", return_value="a" * 20000)
     def test_long_response_split(self, mock_claude):
         say = MagicMock()
-        client = MagicMock()
+        client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
         app.post_response("hello", "C1", "ts1", "ev1", say, client)
 
         assert say.call_count == 2
+        # 最初のチャンクにはメタデータなし
+        assert "metadata" not in say.call_args_list[0][1]
+        # 最後のチャンクにメタデータが付与される
+        assert say.call_args_list[1][1]["metadata"]["event_type"] == "claude_session"
 
 
 # --- handle_mention ---

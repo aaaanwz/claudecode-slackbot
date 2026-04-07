@@ -49,6 +49,27 @@ thread_locks_lock = threading.Lock()
 
 thread_session_ids = {}
 
+SESSION_METADATA_TYPE = "claude_session"
+
+
+def make_session_metadata(session_id):
+    return {"event_type": SESSION_METADATA_TYPE, "event_payload": {"session_id": session_id}}
+
+
+def find_session_id_from_metadata(client, channel, thread_ts):
+    """スレッド内の最新メタデータからセッションIDを復元する。"""
+    resp = client.conversations_replies(
+        channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
+    )
+    for msg in reversed(resp.get("messages", [])):
+        metadata = msg.get("metadata", {})
+        if metadata.get("event_type") == SESSION_METADATA_TYPE:
+            session_id = metadata.get("event_payload", {}).get("session_id")
+            if session_id:
+                logger.info("[metadata] recovered session=%s from thread ts=%s", session_id, thread_ts)
+                return session_id
+    return None
+
 
 class SessionResumeError(Exception):
     pass
@@ -94,43 +115,13 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
     return chunks
 
 
-def fetch_thread_history(client, channel, thread_ts):
-    """Slackスレッドの過去のやり取りを会話コンテキスト文字列として返す。"""
-    resp = client.conversations_replies(channel=channel, ts=thread_ts, limit=100)
-    messages = resp.get("messages", [])
-    lines = []
-    for msg in messages:
-        if msg.get("subtype"):
-            continue
-        is_bot = msg.get("bot_id") is not None
-        role = "assistant" if is_bot else "user"
-        text = msg.get("text", "")
-        if not is_bot:
-            text = strip_mention(text)
-        if text:
-            lines.append(f"[{role}]\n{text}")
-    return "\n\n".join(lines)
-
-
-def run_claude(prompt, thread_ts, conversation_context=None):
-    session_id = thread_session_ids.get(thread_ts)
-    is_resume = session_id is not None and conversation_context is None
-    if session_id is None:
-        # 新規セッションを作成
-        session_id = str(uuid.uuid4())
-
-    if is_resume:
+def run_claude(prompt, session_id, resume=False):
+    if resume:
         cmd = ["claude", "-p", "--resume", session_id, prompt]
     else:
-        full_prompt = prompt
-        if conversation_context:
-            full_prompt = (
-                "以下はこれまでの会話履歴です。最後のユーザーメッセージに応答してください:\n\n"
-                + conversation_context
-            )
-        cmd = ["claude", "-p", "--session-id", session_id, full_prompt]
+        cmd = ["claude", "-p", "--session-id", session_id, prompt]
 
-    mode = "resume" if is_resume else "new"
+    mode = "resume" if resume else "new"
     logger.info("[claude] >>> %s session=%s prompt=%s", mode, session_id, prompt[:120])
 
     result = subprocess.run(
@@ -147,15 +138,12 @@ def run_claude(prompt, thread_ts, conversation_context=None):
             else f"claude exited with code {result.returncode}"
         )
         logger.error("[claude] <<< error (code=%d): %s", result.returncode, error_msg[:200])
-        if is_resume:
-            thread_session_ids.pop(thread_ts, None)
+        if resume:
             raise SessionResumeError(error_msg)
         raise RuntimeError(f"claude CLI error: {error_msg}")
 
     output = result.stdout.strip()
     logger.info("[claude] <<< %d chars | %s", len(output), output[:120])
-    # 成功したらセッションIDを記録
-    thread_session_ids[thread_ts] = session_id
     return output
 
 
@@ -170,25 +158,51 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
     lock = get_thread_lock(thread_ts)
     with lock:
         try:
-            if thread_ts not in thread_session_ids:
-                logger.info("[claude] rebuilding from thread history ts=%s", thread_ts)
-                history = fetch_thread_history(client, channel, thread_ts)
-                response = run_claude(text, thread_ts, conversation_context=history)
-            else:
+            # セッションIDの復元/生成
+            should_resume = thread_ts in thread_session_ids
+            if not should_resume:
                 try:
-                    response = run_claude(text, thread_ts)
+                    recovered_id = find_session_id_from_metadata(client, channel, thread_ts)
+                except Exception:
+                    logger.warning(
+                        "[slack] failed to recover session metadata, starting new session ts=%s",
+                        thread_ts,
+                        exc_info=True,
+                    )
+                    recovered_id = None
+
+                if recovered_id:
+                    thread_session_ids[thread_ts] = recovered_id
+                    should_resume = True
+                else:
+                    thread_session_ids[thread_ts] = str(uuid.uuid4())
+
+            session_id = thread_session_ids[thread_ts]
+
+            if should_resume:
+                try:
+                    response = run_claude(text, session_id, resume=True)
                 except SessionResumeError:
-                    logger.warning("[claude] session resume failed, rebuilding ts=%s", thread_ts)
-                    history = fetch_thread_history(client, channel, thread_ts)
-                    response = run_claude(text, thread_ts, conversation_context=history)
+                    logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
+                    session_id = str(uuid.uuid4())
+                    thread_session_ids[thread_ts] = session_id
+                    response = run_claude(text, session_id)
+            else:
+                response = run_claude(text, session_id)
+
             if not response:
                 response = "応答を生成できませんでした。"
-            for chunk in split_markdown(response):
-                say(
-                    blocks=[{"type": "markdown", "text": chunk}],
-                    text=chunk,
-                    thread_ts=thread_ts,
-                )
+
+            chunks = split_markdown(response)
+            for i, chunk in enumerate(chunks):
+                kwargs = {
+                    "blocks": [{"type": "markdown", "text": chunk}],
+                    "text": chunk,
+                    "thread_ts": thread_ts,
+                }
+                if i == len(chunks) - 1:
+                    kwargs["metadata"] = make_session_metadata(session_id)
+                say(**kwargs)
         except subprocess.TimeoutExpired:
             logger.error("[claude] timeout after %ds ts=%s", CLAUDE_TIMEOUT, thread_ts)
             say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
