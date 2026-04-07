@@ -56,11 +56,14 @@ def make_session_metadata(session_id):
     return {"event_type": SESSION_METADATA_TYPE, "event_payload": {"session_id": session_id}}
 
 
+METADATA_SCAN_MAX_PAGES = 10
+
+
 def find_session_id_from_metadata(client, channel, thread_ts):
     """スレッド内のメタデータから最新のセッションIDを復元する。"""
     latest_session_id = None
     cursor = None
-    while True:
+    for page in range(METADATA_SCAN_MAX_PAGES):
         params = {
             "channel": channel,
             "ts": thread_ts,
@@ -81,6 +84,13 @@ def find_session_id_from_metadata(client, channel, thread_ts):
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
             break
+    else:
+        if cursor:
+            logger.warning(
+                "[metadata] scan truncated at %d pages for thread ts=%s",
+                METADATA_SCAN_MAX_PAGES,
+                thread_ts,
+            )
 
     if latest_session_id:
         logger.info("[metadata] recovered session=%s from thread ts=%s", latest_session_id, thread_ts)
