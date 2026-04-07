@@ -4,9 +4,8 @@ import re
 import subprocess
 import tempfile
 import threading
+import urllib.request
 import uuid
-
-import requests
 
 from dotenv import load_dotenv
 from slack_bolt import App
@@ -99,14 +98,15 @@ def download_slack_files(files, token):
             continue
         name = f.get("name", "unknown")
         try:
-            resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=60)
-            resp.raise_for_status()
+            req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                content = resp.read()
             tmp_dir = tempfile.mkdtemp(prefix="slack_")
             dest = os.path.join(tmp_dir, name)
             with open(dest, "wb") as fp:
-                fp.write(resp.content)
+                fp.write(content)
             saved_paths.append(dest)
-            logger.info("[file] downloaded %s -> %s (%d bytes)", name, dest, len(resp.content))
+            logger.info("[file] downloaded %s -> %s (%d bytes)", name, dest, len(content))
         except Exception:
             logger.warning("[file] failed to download %s", name, exc_info=True)
     return saved_paths
