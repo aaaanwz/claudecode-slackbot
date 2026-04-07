@@ -188,6 +188,40 @@ class TestFindSessionIdFromMetadata:
         result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
         assert result == "new-session"
 
+    def test_returns_latest_session_id_across_pages(self):
+        client = MagicMock()
+        client.conversations_replies.side_effect = [
+            {
+                "messages": [
+                    {
+                        "user": "B1",
+                        "text": "old",
+                        "metadata": {
+                            "event_type": "claude_session",
+                            "event_payload": {"session_id": "page1-session"},
+                        },
+                    },
+                ],
+                "response_metadata": {"next_cursor": "cursor_abc"},
+            },
+            {
+                "messages": [
+                    {"user": "U1", "text": "hello"},
+                    {
+                        "user": "B1",
+                        "text": "new",
+                        "metadata": {
+                            "event_type": "claude_session",
+                            "event_payload": {"session_id": "page2-session"},
+                        },
+                    },
+                ],
+            },
+        ]
+        result = app.find_session_id_from_metadata(client, "C1", "1234.5678")
+        assert result == "page2-session"
+        assert client.conversations_replies.call_count == 2
+
     def test_returns_none_when_no_metadata(self):
         client = MagicMock()
         client.conversations_replies.return_value = {

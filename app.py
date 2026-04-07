@@ -58,6 +58,7 @@ def make_session_metadata(session_id):
 
 def find_session_id_from_metadata(client, channel, thread_ts):
     """スレッド内のメタデータから最新のセッションIDを復元する。"""
+    latest_session_id = None
     cursor = None
     while True:
         params = {
@@ -70,18 +71,20 @@ def find_session_id_from_metadata(client, channel, thread_ts):
             params["cursor"] = cursor
 
         resp = client.conversations_replies(**params)
-        messages = resp.get("messages", [])
-        for msg in reversed(messages):
+        for msg in resp.get("messages", []):
             metadata = msg.get("metadata", {})
             if metadata.get("event_type") == SESSION_METADATA_TYPE:
                 session_id = metadata.get("event_payload", {}).get("session_id")
                 if session_id:
-                    logger.info("[metadata] recovered session=%s from thread ts=%s", session_id, thread_ts)
-                    return session_id
+                    latest_session_id = session_id
 
         cursor = resp.get("response_metadata", {}).get("next_cursor")
         if not cursor:
-            return None
+            break
+
+    if latest_session_id:
+        logger.info("[metadata] recovered session=%s from thread ts=%s", latest_session_id, thread_ts)
+    return latest_session_id
 
 
 class SessionResumeError(Exception):
