@@ -170,27 +170,43 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
 
     lock = get_thread_lock(thread_ts)
     with lock:
-        # セッションIDの復元/生成
-        should_resume = thread_ts in thread_session_ids
-        if not should_resume:
-            recovered_id = find_session_id_from_metadata(client, channel, thread_ts)
-            if recovered_id:
-                thread_session_ids[thread_ts] = recovered_id
-                should_resume = True
-            else:
-                thread_session_ids[thread_ts] = str(uuid.uuid4())
-
-        session_id = thread_session_ids[thread_ts]
-
         try:
+            # セッションIDの復元/生成
+            should_resume = thread_ts in thread_session_ids
+            if not should_resume:
+                try:
+                    recovered_id = find_session_id_from_metadata(client, channel, thread_ts)
+                except Exception:
+                    logger.warning(
+                        "[slack] failed to recover session metadata, starting new session ts=%s",
+                        thread_ts,
+                        exc_info=True,
+                    )
+                    recovered_id = None
+
+                if recovered_id:
+                    thread_session_ids[thread_ts] = recovered_id
+                    should_resume = True
+                else:
+                    thread_session_ids[thread_ts] = str(uuid.uuid4())
+
+            session_id = thread_session_ids[thread_ts]
+
             # 初回のみメタデータ付き「処理中です」メッセージを投稿
             if not should_resume:
-                client.chat_postMessage(
-                    channel=channel,
-                    thread_ts=thread_ts,
-                    text="処理中です。しばらくお待ちください",
-                    metadata=make_session_metadata(session_id),
-                )
+                try:
+                    client.chat_postMessage(
+                        channel=channel,
+                        thread_ts=thread_ts,
+                        text="処理中です。しばらくお待ちください",
+                        metadata=make_session_metadata(session_id),
+                    )
+                except Exception:
+                    logger.warning(
+                        "[slack] failed to post initial processing message ts=%s",
+                        thread_ts,
+                        exc_info=True,
+                    )
 
             if should_resume:
                 try:
@@ -199,12 +215,19 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
                     logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
                     session_id = str(uuid.uuid4())
                     thread_session_ids[thread_ts] = session_id
-                    client.chat_postMessage(
-                        channel=channel,
-                        thread_ts=thread_ts,
-                        text="処理中です。しばらくお待ちください",
-                        metadata=make_session_metadata(session_id),
-                    )
+                    try:
+                        client.chat_postMessage(
+                            channel=channel,
+                            thread_ts=thread_ts,
+                            text="処理中です。しばらくお待ちください",
+                            metadata=make_session_metadata(session_id),
+                        )
+                    except Exception:
+                        logger.warning(
+                            "[slack] failed to post processing message on resume fallback ts=%s",
+                            thread_ts,
+                            exc_info=True,
+                        )
                     response = run_claude(text, session_id)
             else:
                 response = run_claude(text, session_id)
