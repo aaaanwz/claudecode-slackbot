@@ -12,14 +12,14 @@ import app
 
 
 class TestDownloadSlackFiles:
-    @patch("app.urllib.request.urlopen")
+    @patch("app._slack_opener.open")
     @patch("app.urllib.request.Request")
-    def test_downloads_file(self, mock_request_cls, mock_urlopen):
+    def test_downloads_file(self, mock_request_cls, mock_open):
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"file content"
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_open.return_value = mock_resp
 
         files = [{"url_private_download": "https://files.slack.com/abc", "name": "test.txt"}]
         paths = app.download_slack_files(files, "xoxb-token")
@@ -34,30 +34,30 @@ class TestDownloadSlackFiles:
             headers={"Authorization": "Bearer xoxb-token"},
         )
 
-    @patch("app.urllib.request.urlopen")
-    def test_skips_file_without_url(self, mock_urlopen):
+    @patch("app._slack_opener.open")
+    def test_skips_file_without_url(self, mock_open):
         files = [{"name": "test.txt"}]
         paths = app.download_slack_files(files, "xoxb-token")
 
         assert paths == []
-        mock_urlopen.assert_not_called()
+        mock_open.assert_not_called()
 
-    @patch("app.urllib.request.urlopen", side_effect=Exception("network error"))
+    @patch("app._slack_opener.open", side_effect=Exception("network error"))
     @patch("app.urllib.request.Request")
-    def test_handles_download_error(self, mock_request_cls, mock_urlopen):
+    def test_handles_download_error(self, mock_request_cls, mock_open):
         files = [{"url_private_download": "https://files.slack.com/abc", "name": "test.txt"}]
         paths = app.download_slack_files(files, "xoxb-token")
 
         assert paths == []
 
-    @patch("app.urllib.request.urlopen")
+    @patch("app._slack_opener.open")
     @patch("app.urllib.request.Request")
-    def test_downloads_multiple_files(self, mock_request_cls, mock_urlopen):
+    def test_downloads_multiple_files(self, mock_request_cls, mock_open):
         mock_resp = MagicMock()
         mock_resp.read.return_value = b"data"
         mock_resp.__enter__ = MagicMock(return_value=mock_resp)
         mock_resp.__exit__ = MagicMock(return_value=False)
-        mock_urlopen.return_value = mock_resp
+        mock_open.return_value = mock_resp
 
         files = [
             {"url_private_download": "https://files.slack.com/a", "name": "a.txt"},

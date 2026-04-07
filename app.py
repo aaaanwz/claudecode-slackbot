@@ -89,6 +89,21 @@ def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
 
 
+class _KeepAuthRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """リダイレクト時にAuthorizationヘッダーを維持するハンドラ。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new_req = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new_req is not None:
+            auth = req.get_header("Authorization")
+            if auth:
+                new_req.add_header("Authorization", auth)
+        return new_req
+
+
+_slack_opener = urllib.request.build_opener(_KeepAuthRedirectHandler)
+
+
 def download_slack_files(files, token):
     """Slackのファイルを/tmpにダウンロードし、保存先パスのリストを返す。"""
     saved_paths = []
@@ -99,7 +114,7 @@ def download_slack_files(files, token):
         name = f.get("name", "unknown")
         try:
             req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            with _slack_opener.open(req, timeout=60) as resp:
                 content = resp.read()
             tmp_dir = tempfile.mkdtemp(prefix="slack_")
             dest = os.path.join(tmp_dir, name)
