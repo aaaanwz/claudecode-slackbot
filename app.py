@@ -247,9 +247,9 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
         except subprocess.TimeoutExpired:
             logger.error("[claude] timeout after %ds ts=%s", CLAUDE_TIMEOUT, thread_ts)
             say(text=f"タイムアウトしました（{CLAUDE_TIMEOUT // 60}分）。", thread_ts=thread_ts)
-        except Exception:
+        except Exception as e:
             logger.exception("[error] ts=%s", thread_ts)
-            say(text="エラーが発生しました。", thread_ts=thread_ts)
+            say(text=f"エラーが発生しました: {e}", thread_ts=thread_ts)
         finally:
             try:
                 client.reactions_remove(
