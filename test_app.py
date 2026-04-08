@@ -27,6 +27,33 @@ class TestStripMention:
         assert app.strip_mention("hi <@U12345> there") == "hi there"
 
 
+# --- has_non_bot_mention ---
+
+
+class TestHasNonBotMention:
+    def setup_method(self):
+        self._original = app.BOT_USER_ID
+        app.BOT_USER_ID = "B999"
+
+    def teardown_method(self):
+        app.BOT_USER_ID = self._original
+
+    def test_no_mention(self):
+        assert app.has_non_bot_mention("hello world") is False
+
+    def test_bot_mention_only(self):
+        assert app.has_non_bot_mention("<@B999> hello") is False
+
+    def test_other_user_mention(self):
+        assert app.has_non_bot_mention("<@U123> hello") is True
+
+    def test_bot_and_other_mention(self):
+        assert app.has_non_bot_mention("<@B999> <@U123> hello") is True
+
+    def test_multiple_other_mentions(self):
+        assert app.has_non_bot_mention("<@U123> <@U456> hello") is True
+
+
 # --- split_markdown ---
 
 
@@ -521,6 +548,41 @@ class TestHandleMessage:
         app.handle_message(event, say, client)
 
         assert "1000" not in app.active_sessions
+
+    @patch("app.IGNORE_NON_BOT_MENTIONS", True)
+    def test_ignores_non_bot_mention_in_thread(self):
+        say = MagicMock()
+        client = MagicMock()
+        app.active_sessions.add("1000")
+        event = {
+            "text": "<@U111> can you check this?",
+            "ts": "1234",
+            "thread_ts": "1000",
+            "channel": "C1",
+        }
+
+        with patch("app.threading.Thread") as mock_thread_cls:
+            app.handle_message(event, say, client)
+            mock_thread_cls.assert_not_called()
+
+    @patch("app.IGNORE_NON_BOT_MENTIONS", False)
+    @patch("app.threading.Thread")
+    def test_responds_to_non_bot_mention_when_flag_disabled(self, mock_thread_cls):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        app.active_sessions.add("1000")
+        event = {
+            "text": "<@U111> can you check this?",
+            "ts": "1234",
+            "thread_ts": "1000",
+            "channel": "C1",
+        }
+
+        app.handle_message(event, say, client)
+
+        mock_thread.start.assert_called_once()
 
     def test_ignores_empty_text_in_active_thread(self):
         say = MagicMock()

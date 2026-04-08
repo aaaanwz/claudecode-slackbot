@@ -22,6 +22,7 @@ load_dotenv()
 CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))
 CLAUDE_CHECK_INTERVAL = int(os.environ.get("CLAUDE_CHECK_INTERVAL", "300"))
+IGNORE_NON_BOT_MENTIONS = os.environ.get("IGNORE_NON_BOT_MENTIONS", "1").strip().lower() in ("1", "true", "yes")
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
@@ -81,6 +82,12 @@ def get_thread_lock(thread_ts):
         if thread_ts not in thread_locks:
             thread_locks[thread_ts] = threading.Lock()
         return thread_locks[thread_ts]
+
+
+def has_non_bot_mention(text):
+    """テキストにBot以外のユーザーへのメンションが含まれているか判定する。"""
+    mentions = re.findall(r"<@([A-Z0-9]+)>", text)
+    return any(uid != BOT_USER_ID for uid in mentions)
 
 
 def strip_mention(text):
@@ -290,6 +297,10 @@ def handle_message(event, say, client):
 
     text = event.get("text", "")
     if BOT_USER_ID and f"<@{BOT_USER_ID}>" in text:
+        return
+
+    if IGNORE_NON_BOT_MENTIONS and has_non_bot_mention(text):
+        logger.info("[skip] non-bot mention in thread ts=%s", thread_ts)
         return
 
     with sessions_lock:
