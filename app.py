@@ -169,11 +169,7 @@ def run_claude(prompt, session_id, resume=False, on_still_running=None):
     stderr = stderr_chunks[0] if stderr_chunks else ""
 
     if proc.returncode != 0:
-        error_msg = (
-            stderr.strip()
-            if stderr
-            else f"claude exited with code {proc.returncode}"
-        )
+        error_msg = (stderr.strip() or stdout.strip() or f"claude exited with code {proc.returncode}")
         logger.error("[claude] <<< error (code=%d): %s", proc.returncode, error_msg[:200])
         if resume:
             raise SessionResumeError(error_msg)
