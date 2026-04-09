@@ -125,9 +125,9 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
 
 def run_claude(prompt, session_id, resume=False, on_still_running=None):
     if resume:
-        cmd = ["claude", "-p", "--resume", session_id, prompt]
+        cmd = ["claude", "-p", "--resume", session_id, "--", prompt]
     else:
-        cmd = ["claude", "-p", "--session-id", session_id, prompt]
+        cmd = ["claude", "-p", "--session-id", session_id, "--", prompt]
 
     mode = "resume" if resume else "new"
     logger.info("[claude] >>> %s session=%s prompt=%s", mode, session_id, prompt[:120])
