@@ -9,6 +9,7 @@ import uuid
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -62,9 +63,15 @@ def make_session_metadata(session_id):
 
 def find_session_id_from_metadata(client, channel, thread_ts):
     """スレッド内の最新メタデータからセッションIDを復元する。"""
-    resp = client.conversations_replies(
-        channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
-    )
+    try:
+        resp = client.conversations_replies(
+            channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
+        )
+    except SlackApiError as e:
+        # 新規スレッドの初回メンション時はスレッド自体が未作成のため発生する想定内のエラー
+        if e.response.get("error") == "thread_not_found":
+            return None
+        raise
     for msg in reversed(resp.get("messages", [])):
         metadata = msg.get("metadata", {})
         if metadata.get("event_type") == SESSION_METADATA_TYPE:
@@ -166,10 +173,12 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
 
 
 def run_claude(prompt, session_id, resume=False, on_still_running=None):
+    os.makedirs(SLACK_ATTACHMENTS_BASE, exist_ok=True)
+    cmd = ["claude", "-p", "--add-dir", SLACK_ATTACHMENTS_BASE]
     if resume:
-        cmd = ["claude", "-p", "--resume", session_id, "--", prompt]
+        cmd += ["--resume", session_id, "--", prompt]
     else:
-        cmd = ["claude", "-p", "--session-id", session_id, "--", prompt]
+        cmd += ["--session-id", session_id, "--", prompt]
 
     mode = "resume" if resume else "new"
     logger.info("[claude] >>> %s session=%s prompt=%s", mode, session_id, prompt[:120])
