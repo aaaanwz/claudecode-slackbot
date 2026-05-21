@@ -1,4 +1,6 @@
+import os
 import subprocess
+import tempfile
 import threading
 from unittest.mock import ANY, MagicMock, patch
 
@@ -255,7 +257,7 @@ class TestPostResponse:
         client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
-        app.post_response("hello", "C1", "ts1", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
 
         mock_claude.assert_called_once_with("hello", "session1", resume=True, on_still_running=ANY)
         client.reactions_add.assert_called_once()
@@ -271,7 +273,7 @@ class TestPostResponse:
         say = MagicMock()
         client = _make_client()
 
-        app.post_response("hello", "C1", "ts_new", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts_new", "ev1", say, client)
 
         say.assert_called_once()
         assert say.call_args[1]["text"] == "new reply"
@@ -296,7 +298,7 @@ class TestPostResponse:
             ]
         }
 
-        app.post_response("hello", "C1", "ts_recover", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts_recover", "ev1", say, client)
 
         assert app.thread_session_ids["ts_recover"] == "recovered-id"
         mock_claude.assert_called_once_with("hello", "recovered-id", resume=True, on_still_running=ANY)
@@ -311,7 +313,7 @@ class TestPostResponse:
         client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
-        app.post_response("hello", "C1", "ts1", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
 
         assert mock_claude.call_count == 2
         first_call = mock_claude.call_args_list[0]
@@ -326,7 +328,7 @@ class TestPostResponse:
         client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
-        app.post_response("hello", "C1", "ts1", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
 
         say.assert_called_once()
         assert "タイムアウト" in say.call_args[1]["text"]
@@ -338,7 +340,7 @@ class TestPostResponse:
         client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
-        app.post_response("hello", "C1", "ts1", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
 
         say.assert_called_once()
         assert "エラー" in say.call_args[1]["text"]
@@ -350,7 +352,7 @@ class TestPostResponse:
         client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
-        app.post_response("hello", "C1", "ts1", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
 
         assert "応答を生成できませんでした" in say.call_args[1]["text"]
 
@@ -360,7 +362,7 @@ class TestPostResponse:
         client = _make_client()
         app.thread_session_ids["ts1"] = "session1"
 
-        app.post_response("hello", "C1", "ts1", "ev1", say, client)
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
 
         assert say.call_count == 2
         # 最初のチャンクにはメタデータなし
@@ -421,6 +423,28 @@ class TestHandleMention:
 
         assert "1000" in app.active_sessions
 
+    @patch("app.threading.Thread")
+    def test_attachment_only_triggers_thread(self, mock_thread_cls):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        event = {
+            "text": "<@BOT>",
+            "ts": "1234",
+            "channel": "C1",
+            "files": [{"id": "F1", "name": "a.txt", "url_private_download": "https://x/y"}],
+        }
+
+        app.handle_mention(event, say, client)
+
+        say.assert_not_called()
+        mock_thread.start.assert_called_once()
+        args = mock_thread_cls.call_args[1]["args"]
+        # post_response(text, files, channel, thread_ts, event_ts, say, client)
+        assert args[0] == ""
+        assert args[1] == event["files"]
+
 
 # --- handle_message ---
 
@@ -461,7 +485,7 @@ class TestHandleMessage:
 
         say.assert_not_called()
 
-    def test_ignores_subtype_message(self):
+    def test_ignores_non_file_subtype(self):
         say = MagicMock()
         client = MagicMock()
         event = {
@@ -475,6 +499,29 @@ class TestHandleMessage:
         app.handle_message(event, say, client)
 
         say.assert_not_called()
+
+    @patch("app.threading.Thread")
+    def test_accepts_file_share_subtype(self, mock_thread_cls):
+        mock_thread = MagicMock()
+        mock_thread_cls.return_value = mock_thread
+        say = MagicMock()
+        client = MagicMock()
+        app.active_sessions.add("1000")
+        event = {
+            "text": "",
+            "ts": "1234",
+            "thread_ts": "1000",
+            "channel": "C1",
+            "subtype": "file_share",
+            "files": [{"id": "F1", "name": "a.txt", "url_private_download": "https://x/y"}],
+        }
+
+        app.handle_message(event, say, client)
+
+        mock_thread.start.assert_called_once()
+        args = mock_thread_cls.call_args[1]["args"]
+        assert args[0] == ""
+        assert args[1] == event["files"]
 
     def test_ignores_mention_to_bot(self):
         say = MagicMock()
@@ -621,3 +668,169 @@ class TestGetThreadLock:
         lock1 = app.get_thread_lock("ts1")
         lock2 = app.get_thread_lock("ts2")
         assert lock1 is not lock2
+
+
+# --- build_prompt ---
+
+
+class TestBuildPrompt:
+    def test_text_only(self):
+        assert app.build_prompt("hello", []) == "hello"
+
+    def test_files_only(self):
+        prompt = app.build_prompt("", ["/tmp/claude/sess/a.png"])
+        assert prompt == "添付ファイル:\n- /tmp/claude/sess/a.png"
+
+    def test_text_and_files(self):
+        prompt = app.build_prompt("hi", ["/tmp/claude/sess/a.png", "/tmp/claude/sess/b.txt"])
+        assert prompt.startswith("hi\n\n添付ファイル:\n")
+        assert "- /tmp/claude/sess/a.png" in prompt
+        assert "- /tmp/claude/sess/b.txt" in prompt
+
+
+# --- download_slack_files ---
+
+
+def _make_urlopen_mock(content):
+    """urllib.request.urlopen のコンテキストマネージャ風モックを生成する。"""
+    cm = MagicMock()
+    chunks = []
+    for i in range(0, len(content), 64 * 1024):
+        chunks.append(content[i:i + 64 * 1024])
+    chunks.append(b"")
+    cm.read.side_effect = chunks
+    cm.__enter__.return_value = cm
+    cm.__exit__.return_value = False
+    return cm
+
+
+class TestDownloadSlackFiles:
+    _UNSET = object()
+
+    def setup_method(self):
+        self._tmpdir = tempfile.mkdtemp()
+        self._orig_base = app.SLACK_ATTACHMENTS_BASE
+        self._orig_token = os.environ.get("SLACK_BOT_TOKEN", self._UNSET)
+        app.SLACK_ATTACHMENTS_BASE = self._tmpdir
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+
+    def teardown_method(self):
+        app.SLACK_ATTACHMENTS_BASE = self._orig_base
+        if self._orig_token is self._UNSET:
+            os.environ.pop("SLACK_BOT_TOKEN", None)
+        else:
+            os.environ["SLACK_BOT_TOKEN"] = self._orig_token
+        import shutil as _sh
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    def test_empty_files_returns_empty(self):
+        assert app.download_slack_files([], "sess-1") == []
+        assert app.download_slack_files(None, "sess-1") == []
+
+    @patch("app.urllib.request.urlopen")
+    def test_downloads_to_session_dir(self, mock_urlopen):
+        mock_urlopen.return_value = _make_urlopen_mock(b"hello world")
+        files = [{"id": "F1", "name": "note.txt", "url_private_download": "https://x/y"}]
+
+        paths = app.download_slack_files(files, "sess-A")
+
+        assert len(paths) == 1
+        assert paths[0] == os.path.join(self._tmpdir, "sess-A", "note.txt")
+        with open(paths[0], "rb") as f:
+            assert f.read() == b"hello world"
+        # Authorization ヘッダにBot Tokenが付く
+        req = mock_urlopen.call_args[0][0]
+        assert req.headers.get("Authorization") == "Bearer xoxb-test"
+
+    @patch("app.urllib.request.urlopen")
+    def test_skips_files_without_url(self, mock_urlopen):
+        files = [{"id": "F1", "name": "a.txt"}]
+
+        paths = app.download_slack_files(files, "sess-B")
+
+        assert paths == []
+        mock_urlopen.assert_not_called()
+
+    @patch("app.urllib.request.urlopen", side_effect=OSError("network"))
+    def test_continues_on_download_failure(self, mock_urlopen):
+        files = [{"id": "F1", "name": "a.txt", "url_private_download": "https://x/y"}]
+
+        paths = app.download_slack_files(files, "sess-C")
+
+        assert paths == []
+
+    @patch("app.urllib.request.urlopen")
+    def test_falls_back_to_url_private(self, mock_urlopen):
+        mock_urlopen.return_value = _make_urlopen_mock(b"x")
+        files = [{"id": "F1", "name": "a.txt", "url_private": "https://x/p"}]
+
+        paths = app.download_slack_files(files, "sess-D")
+
+        assert len(paths) == 1
+        req = mock_urlopen.call_args[0][0]
+        assert req.full_url == "https://x/p"
+
+    @patch("app.urllib.request.urlopen")
+    def test_strips_path_components_from_name(self, mock_urlopen):
+        mock_urlopen.return_value = _make_urlopen_mock(b"x")
+        files = [{"id": "F1", "name": "../../etc/passwd", "url_private_download": "https://x/y"}]
+
+        paths = app.download_slack_files(files, "sess-E")
+
+        assert len(paths) == 1
+        assert os.path.dirname(paths[0]) == os.path.join(self._tmpdir, "sess-E")
+        assert os.path.basename(paths[0]) == "passwd"
+
+
+# --- post_response with files ---
+
+
+class TestPostResponseWithFiles:
+    def setup_method(self):
+        self._sessions = app.thread_session_ids.copy()
+        app.thread_session_ids.clear()
+        self._locks = app.thread_locks.copy()
+        app.thread_locks.clear()
+        self._tmpdir = tempfile.mkdtemp()
+        self._orig_base = app.SLACK_ATTACHMENTS_BASE
+        app.SLACK_ATTACHMENTS_BASE = self._tmpdir
+        os.environ["SLACK_BOT_TOKEN"] = "xoxb-test"
+
+    def teardown_method(self):
+        app.thread_session_ids.clear()
+        app.thread_session_ids.update(self._sessions)
+        app.thread_locks.clear()
+        app.thread_locks.update(self._locks)
+        app.SLACK_ATTACHMENTS_BASE = self._orig_base
+        import shutil as _sh
+        _sh.rmtree(self._tmpdir, ignore_errors=True)
+
+    @patch("app.urllib.request.urlopen")
+    @patch("app.run_claude", return_value="reply")
+    def test_attachments_embedded_in_prompt(self, mock_claude, mock_urlopen):
+        mock_urlopen.return_value = _make_urlopen_mock(b"hello")
+        say = MagicMock()
+        client = _make_client()
+        files = [{"id": "F1", "name": "a.txt", "url_private_download": "https://x/y"}]
+
+        app.post_response("describe", files, "C1", "ts1", "ev1", say, client)
+
+        prompt_arg = mock_claude.call_args[0][0]
+        assert prompt_arg.startswith("describe")
+        assert "添付ファイル:" in prompt_arg
+        session_id = app.thread_session_ids["ts1"]
+        expected = os.path.join(self._tmpdir, session_id, "a.txt")
+        assert f"- {expected}" in prompt_arg
+
+    @patch("app.urllib.request.urlopen")
+    @patch("app.run_claude", return_value="reply")
+    def test_attachments_only_no_text(self, mock_claude, mock_urlopen):
+        mock_urlopen.return_value = _make_urlopen_mock(b"hello")
+        say = MagicMock()
+        client = _make_client()
+        files = [{"id": "F1", "name": "a.txt", "url_private_download": "https://x/y"}]
+
+        app.post_response("", files, "C1", "ts1", "ev1", say, client)
+
+        prompt_arg = mock_claude.call_args[0][0]
+        assert prompt_arg.startswith("添付ファイル:\n- ")

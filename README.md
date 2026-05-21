@@ -37,6 +37,7 @@
    - `chat:write`
    - `channels:history`（スレッド内メッセージの受信に必要）
    - `reactions:write`（処理中インジケーターに必要）
+   - `files:read`（添付ファイルのダウンロードに必要）
 3. ページ上部の「Install to Workspace」をクリックし、権限を許可
 4. 表示される `xoxb-` で始まるBot User OAuth Tokenを控える
 
@@ -133,6 +134,7 @@ sudo systemctl restart claudecode-slackbot
 1. Botをメンションしてメッセージを送信すると、Claude Codeのセッションが開始される
 2. スレッド内で返信すると、同じセッションで会話が継続される（メンション不要）
 3. 処理中は :hourglass_flowing_sand: リアクションが表示される
+4. ファイルを添付して送信すると、サーバー上の `/tmp/claude/<セッションID>/` にダウンロードされ、その絶対パスがプロンプト末尾に `添付ファイル:\n- <path>` の形式で付与されてClaude Codeに渡される。添付のみで本文が空のメッセージも処理される（ファイル添付付きの `message` イベントの `file_share` サブタイプも受理する）。Bot Token Scopes に `files:read` が必要
 
 ## ライセンス
 

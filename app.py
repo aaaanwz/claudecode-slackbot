@@ -3,11 +3,13 @@ import os
 import re
 import subprocess
 import threading
+import urllib.request
 import uuid
 
 from dotenv import load_dotenv
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
+from slack_sdk.errors import SlackApiError
 
 logging.basicConfig(
     level=logging.WARNING,
@@ -23,6 +25,7 @@ CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))
 CLAUDE_CHECK_INTERVAL = int(os.environ.get("CLAUDE_CHECK_INTERVAL", "300"))
 IGNORE_NON_BOT_MENTIONS = os.environ.get("IGNORE_NON_BOT_MENTIONS", "1").strip().lower() in ("1", "true", "yes")
+SLACK_ATTACHMENTS_BASE = "/tmp/claude"
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
@@ -60,9 +63,15 @@ def make_session_metadata(session_id):
 
 def find_session_id_from_metadata(client, channel, thread_ts):
     """スレッド内の最新メタデータからセッションIDを復元する。"""
-    resp = client.conversations_replies(
-        channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
-    )
+    try:
+        resp = client.conversations_replies(
+            channel=channel, ts=thread_ts, limit=100, include_all_metadata=True
+        )
+    except SlackApiError as e:
+        # 新規スレッドの初回メンション時はスレッド自体が未作成のため発生する想定内のエラー
+        if e.response.get("error") == "thread_not_found":
+            return None
+        raise
     for msg in reversed(resp.get("messages", [])):
         metadata = msg.get("metadata", {})
         if metadata.get("event_type") == SESSION_METADATA_TYPE:
@@ -92,6 +101,46 @@ def has_non_bot_mention(text):
 
 def strip_mention(text):
     return re.sub(r"<@[A-Z0-9]+>\s*", "", text).strip()
+
+
+def download_slack_files(files, session_id):
+    """Slack添付ファイルを /tmp/claude/<session_id>/ にダウンロードし、保存先パスのリストを返す。"""
+    if not files:
+        return []
+
+    token = os.environ["SLACK_BOT_TOKEN"]
+    dest_dir = os.path.join(SLACK_ATTACHMENTS_BASE, session_id)
+    os.makedirs(dest_dir, exist_ok=True)
+
+    saved_paths = []
+    for f in files:
+        url = f.get("url_private_download") or f.get("url_private")
+        if not url:
+            continue
+        name = os.path.basename(f.get("name") or "file")
+        dest = os.path.join(dest_dir, name)
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
+        try:
+            with urllib.request.urlopen(req) as resp, open(dest, "wb") as out:
+                while True:
+                    chunk = resp.read(64 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+        except Exception:
+            logger.warning("[slack] failed to download file id=%s", f.get("id"), exc_info=True)
+            continue
+        saved_paths.append(dest)
+    return saved_paths
+
+
+def build_prompt(text, file_paths):
+    if not file_paths:
+        return text
+    listing = "\n".join(f"- {p}" for p in file_paths)
+    if text:
+        return f"{text}\n\n添付ファイル:\n{listing}"
+    return f"添付ファイル:\n{listing}"
 
 
 MARKDOWN_BLOCK_MAX_LENGTH = 12000
@@ -124,10 +173,12 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
 
 
 def run_claude(prompt, session_id, resume=False, on_still_running=None):
+    os.makedirs(SLACK_ATTACHMENTS_BASE, exist_ok=True)
+    cmd = ["claude", "-p", "--add-dir", SLACK_ATTACHMENTS_BASE]
     if resume:
-        cmd = ["claude", "-p", "--resume", session_id, "--", prompt]
+        cmd += ["--resume", session_id, "--", prompt]
     else:
-        cmd = ["claude", "-p", "--session-id", session_id, "--", prompt]
+        cmd += ["--session-id", session_id, "--", prompt]
 
     mode = "resume" if resume else "new"
     logger.info("[claude] >>> %s session=%s prompt=%s", mode, session_id, prompt[:120])
@@ -180,7 +231,7 @@ def run_claude(prompt, session_id, resume=False, on_still_running=None):
     return output
 
 
-def post_response(text, channel, thread_ts, event_ts, say, client):
+def post_response(text, files, channel, thread_ts, event_ts, say, client):
     try:
         client.reactions_add(
             channel=channel, name="hourglass_flowing_sand", timestamp=event_ts
@@ -215,17 +266,21 @@ def post_response(text, channel, thread_ts, event_ts, say, client):
                     thread_session_ids[thread_ts] = str(uuid.uuid4())
 
             session_id = thread_session_ids[thread_ts]
+            file_paths = download_slack_files(files, session_id)
+            prompt = build_prompt(text, file_paths)
 
             if should_resume:
                 try:
-                    response = run_claude(text, session_id, resume=True, on_still_running=on_still_running)
+                    response = run_claude(prompt, session_id, resume=True, on_still_running=on_still_running)
                 except SessionResumeError:
                     logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
                     session_id = str(uuid.uuid4())
                     thread_session_ids[thread_ts] = session_id
-                    response = run_claude(text, session_id, on_still_running=on_still_running)
+                    file_paths = download_slack_files(files, session_id)
+                    prompt = build_prompt(text, file_paths)
+                    response = run_claude(prompt, session_id, on_still_running=on_still_running)
             else:
-                response = run_claude(text, session_id, on_still_running=on_still_running)
+                response = run_claude(prompt, session_id, on_still_running=on_still_running)
 
             if not response:
                 response = "応答を生成できませんでした。"
@@ -262,8 +317,9 @@ def handle_mention(event, say, client):
     thread_ts = event.get("thread_ts", event["ts"])
     text = strip_mention(event.get("text", ""))
     channel = event["channel"]
+    files = event.get("files") or []
 
-    if not text:
+    if not text and not files:
         say(text="メッセージを入力してください。", thread_ts=thread_ts)
         return
 
@@ -272,7 +328,7 @@ def handle_mention(event, say, client):
 
     threading.Thread(
         target=post_response,
-        args=(text, channel, thread_ts, event["ts"], say, client),
+        args=(text, files, channel, thread_ts, event["ts"], say, client),
         daemon=True,
     ).start()
 
@@ -288,7 +344,10 @@ def handle_message(event, say, client):
     if not thread_ts:
         return
 
-    if event.get("bot_id") or event.get("subtype"):
+    if event.get("bot_id"):
+        return
+    subtype = event.get("subtype")
+    if subtype and subtype != "file_share":
         return
 
     text = event.get("text", "")
@@ -315,14 +374,15 @@ def handle_message(event, say, client):
             active_sessions.add(thread_ts)
 
     text = strip_mention(text)
-    if not text:
+    files = event.get("files") or []
+    if not text and not files:
         return
 
     channel = event["channel"]
 
     threading.Thread(
         target=post_response,
-        args=(text, channel, thread_ts, event["ts"], say, client),
+        args=(text, files, channel, thread_ts, event["ts"], say, client),
         daemon=True,
     ).start()
 
