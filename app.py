@@ -117,8 +117,9 @@ def download_slack_files(files, session_id):
         url = f.get("url_private_download") or f.get("url_private")
         if not url:
             continue
-        name = os.path.basename(f.get("name") or f.get("id") or "file")
-        dest = os.path.join(dest_dir, name)
+        file_id = f.get("id") or uuid.uuid4().hex
+        name = os.path.basename(f.get("name") or "file")
+        dest = os.path.join(dest_dir, f"{file_id}_{name}")
         req = urllib.request.Request(url, headers={"Authorization": f"Bearer {token}"})
         try:
             with urllib.request.urlopen(req) as resp, open(dest, "wb") as out:
