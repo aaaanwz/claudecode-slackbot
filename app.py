@@ -339,9 +339,11 @@ def post_response(text, files, channel, thread_ts, event_ts, say, client):
                     f"{cost_line}"
                 )
                 say(
-                    blocks=[{"type": "markdown", "text": notice}],
+                    blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": notice}}],
                     text=notice,
                     thread_ts=thread_ts,
+                    metadata=make_session_metadata(session_id),
+                )
                     metadata=make_session_metadata(session_id),
                 )
                 return
