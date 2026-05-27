@@ -27,7 +27,13 @@ CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))
 CLAUDE_CHECK_INTERVAL = int(os.environ.get("CLAUDE_CHECK_INTERVAL", "300"))
 # 1回の応答（1ターン）あたりのAPI費用上限（USD）。超過するとClaudeが応答を打ち切る
-CLAUDE_MAX_BUDGET_USD = os.environ.get("CLAUDE_MAX_BUDGET_USD", "2")
+_raw_max_budget_usd = os.environ.get("CLAUDE_MAX_BUDGET_USD", "2")
+try:
+    float(_raw_max_budget_usd)
+except ValueError:
+    logger.warning("Invalid CLAUDE_MAX_BUDGET_USD=%r; falling back to 2", _raw_max_budget_usd)
+    _raw_max_budget_usd = "2"
+CLAUDE_MAX_BUDGET_USD = _raw_max_budget_usd
 IGNORE_NON_BOT_MENTIONS = os.environ.get("IGNORE_NON_BOT_MENTIONS", "1").strip().lower() in ("1", "true", "yes")
 SLACK_ATTACHMENTS_BASE = "/tmp/claude"
 
