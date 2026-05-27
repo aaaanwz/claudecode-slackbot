@@ -136,6 +136,14 @@ sudo systemctl restart claudecode-slackbot
 3. 処理中は :hourglass_flowing_sand: リアクションが表示される
 4. ファイルを添付して送信すると、サーバー上の `/tmp/claude/<セッションID>/` にダウンロードされ、その絶対パスがプロンプト末尾に `添付ファイル:\n- <path>` の形式で付与されてClaude Codeに渡される。添付のみで本文が空のメッセージも処理される（ファイル添付付きの `message` イベントの `file_share` サブタイプも受理する）。Bot Token Scopes に `files:read` が必要
 
+## 費用の制御
+
+長時間続くスレッドはセッションが肥大化し、1ターンあたりのトークン費用が膨らみやすい。本Botには以下の抑制策が組み込まれている。
+
+- **費用の可視化**: 各応答の末尾に、そのターンのAPI費用（`total_cost_usd`）を表示する。
+- **費用上限**: 1ターンあたりの費用に上限を設ける（`--max-budget-usd`）。デフォルトは `2`（USD）で、環境変数 `CLAUDE_MAX_BUDGET_USD` で変更できる。上限に達するとClaudeが応答を打ち切り、その旨をSlackに通知する。
+- **キャッシュ再利用の改善**: `--exclude-dynamic-system-prompt-sections` により、cwdや環境情報などの可変セクションをsystem promptから外し、プロンプトキャッシュの再利用率を高めてキャッシュ書き込み費用を抑える。
+
 ## ライセンス
 
 [MIT License](LICENSE)
