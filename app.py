@@ -334,9 +334,8 @@ def post_response(text, files, channel, thread_ts, event_ts, say, client):
             if result.budget_exceeded:
                 # 費用上限に達して応答が打ち切られたことをユーザーに知らせる
                 notice = (
-                    f":warning: 費用上限（${CLAUDE_MAX_BUDGET_USD}）に達したため、応答を途中で打ち切りました。\n"
-                    f"続きが必要な場合は新しいスレッドで小さく分割するか、"
-                    f"管理者に上限（環境変数 `CLAUDE_MAX_BUDGET_USD`）の引き上げを依頼してください。"
+                    ":warning: セッションが長引き、費用上限に達したためスレッドを打ち切ります。"
+                    "要件を整理し、新しいスレッドでやり直してください。"
                     f"{cost_line}"
                 )
                 say(
