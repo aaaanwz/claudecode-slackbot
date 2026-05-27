@@ -350,8 +350,6 @@ def post_response(text, files, channel, thread_ts, event_ts, say, client):
                     thread_ts=thread_ts,
                     metadata=make_session_metadata(session_id),
                 )
-                    metadata=make_session_metadata(session_id),
-                )
                 return
 
             response = result.text or "応答を生成できませんでした。"
