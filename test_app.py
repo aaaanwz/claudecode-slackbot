@@ -1,3 +1,4 @@
+import json
 import os
 import subprocess
 import tempfile
@@ -118,6 +119,22 @@ class TestBotHasReplied:
         assert app.bot_has_replied([]) is False
 
 
+# --- format_cost_line ---
+
+
+class TestFormatCostLine:
+    def test_none_returns_empty(self):
+        assert app.format_cost_line(None) == ""
+
+    def test_formats_cost(self):
+        line = app.format_cost_line(0.1234)
+        assert "$0.1234" in line
+        assert "💰" in line
+
+    def test_rounds_to_four_decimals(self):
+        assert "$0.0106" in app.format_cost_line(0.01059725)
+
+
 # --- run_claude ---
 
 
@@ -131,27 +148,60 @@ def _make_popen_mock(returncode=0, stdout="", stderr=""):
     return mock_proc
 
 
+def _success_json(text="response text", cost=0.0123):
+    """claude -p --output-format json の成功時stdoutを模したJSON文字列を返す。"""
+    return json.dumps(
+        {"type": "result", "subtype": "success", "is_error": False, "result": text, "total_cost_usd": cost}
+    )
+
+
 class TestRunClaude:
     @patch("app.subprocess.Popen")
     def test_new_session(self, mock_popen):
-        mock_popen.return_value = _make_popen_mock(returncode=0, stdout="response text")
+        mock_popen.return_value = _make_popen_mock(returncode=0, stdout=_success_json("response text", 0.0123))
         result = app.run_claude("hello", "session-123")
-        assert result == "response text"
+        assert result.text == "response text"
+        assert result.cost_usd == 0.0123
+        assert result.budget_exceeded is False
 
         cmd = mock_popen.call_args[0][0]
         assert cmd[0] == "claude"
         assert "--session-id" in cmd
         assert "session-123" in cmd
+        # 費用制御まわりのフラグが付与されている
+        assert "--output-format" in cmd
+        assert "json" in cmd
+        assert "--max-budget-usd" in cmd
+        assert "--exclude-dynamic-system-prompt-sections" in cmd
 
     @patch("app.subprocess.Popen")
     def test_resume_session(self, mock_popen):
-        mock_popen.return_value = _make_popen_mock(returncode=0, stdout="resumed response")
+        mock_popen.return_value = _make_popen_mock(returncode=0, stdout=_success_json("resumed response", 0.5))
         result = app.run_claude("follow up", "existing-session-id", resume=True)
-        assert result == "resumed response"
+        assert result.text == "resumed response"
+        assert result.cost_usd == 0.5
 
         cmd = mock_popen.call_args[0][0]
         assert "--resume" in cmd
         assert "existing-session-id" in cmd
+
+    @patch("app.subprocess.Popen")
+    def test_budget_exceeded_returns_flag(self, mock_popen):
+        # 費用上限超過時は終了コード1だが、エラーにせず budget_exceeded=True を返す
+        stdout = json.dumps(
+            {
+                "type": "result",
+                "subtype": "error_max_budget_usd",
+                "is_error": True,
+                "total_cost_usd": 1.5,
+                "errors": ["Reached maximum budget ($2)"],
+            }
+        )
+        mock_popen.return_value = _make_popen_mock(returncode=1, stdout=stdout)
+        result = app.run_claude("hello", "session-123")
+        assert result.budget_exceeded is True
+        assert result.cost_usd == 1.5
+        assert result.text == ""
 
     @patch("app.subprocess.Popen")
     def test_resume_failure_raises_session_resume_error(self, mock_popen):
@@ -251,7 +301,7 @@ class TestPostResponse:
         app.thread_locks.clear()
         app.thread_locks.update(self._locks)
 
-    @patch("app.run_claude", return_value="bot reply")
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="bot reply", cost_usd=0.05, budget_exceeded=False))
     def test_resume_response(self, mock_claude):
         say = MagicMock()
         client = _make_client()
@@ -263,12 +313,14 @@ class TestPostResponse:
         client.reactions_add.assert_called_once()
         client.reactions_remove.assert_called_once()
         say.assert_called_once()
-        assert say.call_args[1]["text"] == "bot reply"
+        # 応答本文と費用行の両方が含まれる
+        assert "bot reply" in say.call_args[1]["text"]
+        assert "💰" in say.call_args[1]["text"]
         # 応答にメタデータが付与される
         assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
         assert say.call_args[1]["metadata"]["event_payload"]["session_id"] == "session1"
 
-    @patch("app.run_claude", return_value="new reply")
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="new reply", cost_usd=0.05, budget_exceeded=False))
     def test_new_session_response(self, mock_claude):
         say = MagicMock()
         client = _make_client()
@@ -276,11 +328,11 @@ class TestPostResponse:
         app.post_response("hello", [], "C1", "ts_new", "ev1", say, client)
 
         say.assert_called_once()
-        assert say.call_args[1]["text"] == "new reply"
+        assert "new reply" in say.call_args[1]["text"]
         # 応答にメタデータが付与される
         assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
 
-    @patch("app.run_claude", return_value="resumed reply")
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="resumed reply", cost_usd=0.05, budget_exceeded=False))
     def test_recovers_session_from_metadata(self, mock_claude):
         say = MagicMock()
         client = _make_client()
@@ -307,7 +359,7 @@ class TestPostResponse:
     def test_resume_failure_starts_new_session(self, mock_claude):
         mock_claude.side_effect = [
             app.SessionResumeError("fail"),
-            "new reply",
+            app.ClaudeResult(text="new reply", cost_usd=0.05, budget_exceeded=False),
         ]
         say = MagicMock()
         client = _make_client()
@@ -346,7 +398,7 @@ class TestPostResponse:
         assert "エラー" in say.call_args[1]["text"]
         client.reactions_remove.assert_called_once()
 
-    @patch("app.run_claude", return_value="")
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="", cost_usd=None, budget_exceeded=False))
     def test_empty_response_fallback(self, mock_claude):
         say = MagicMock()
         client = _make_client()
@@ -356,7 +408,35 @@ class TestPostResponse:
 
         assert "応答を生成できませんでした" in say.call_args[1]["text"]
 
-    @patch("app.run_claude", return_value="a" * 20000)
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="hi", cost_usd=0.1234, budget_exceeded=False))
+    def test_cost_line_appended(self, mock_claude):
+        say = MagicMock()
+        client = _make_client()
+        app.thread_session_ids["ts1"] = "session1"
+
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
+
+        text = say.call_args[1]["text"]
+        assert "hi" in text
+        assert "$0.1234" in text
+
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="", cost_usd=2.0, budget_exceeded=True))
+    def test_budget_exceeded_notifies_user(self, mock_claude):
+        say = MagicMock()
+        client = _make_client()
+        app.thread_session_ids["ts1"] = "session1"
+
+        app.post_response("hello", [], "C1", "ts1", "ev1", say, client)
+
+        say.assert_called_once()
+        text = say.call_args[1]["text"]
+        assert "費用上限" in text
+        assert "$2.0000" in text
+        # 打ち切り通知にもセッションメタデータが付与される
+        assert say.call_args[1]["metadata"]["event_type"] == "claude_session"
+        client.reactions_remove.assert_called_once()
+
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="a" * 20000, cost_usd=0.1, budget_exceeded=False))
     def test_long_response_split(self, mock_claude):
         say = MagicMock()
         client = _make_client()
@@ -806,7 +886,7 @@ class TestPostResponseWithFiles:
         _sh.rmtree(self._tmpdir, ignore_errors=True)
 
     @patch("app.urllib.request.urlopen")
-    @patch("app.run_claude", return_value="reply")
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="reply", cost_usd=0.05, budget_exceeded=False))
     def test_attachments_embedded_in_prompt(self, mock_claude, mock_urlopen):
         mock_urlopen.return_value = _make_urlopen_mock(b"hello")
         say = MagicMock()
@@ -823,7 +903,7 @@ class TestPostResponseWithFiles:
         assert f"- {expected}" in prompt_arg
 
     @patch("app.urllib.request.urlopen")
-    @patch("app.run_claude", return_value="reply")
+    @patch("app.run_claude", return_value=app.ClaudeResult(text="reply", cost_usd=0.05, budget_exceeded=False))
     def test_attachments_only_no_text(self, mock_claude, mock_urlopen):
         mock_urlopen.return_value = _make_urlopen_mock(b"hello")
         say = MagicMock()

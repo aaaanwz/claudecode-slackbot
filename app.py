@@ -1,3 +1,5 @@
+import collections
+import json
 import logging
 import os
 import re
@@ -24,8 +26,13 @@ load_dotenv()
 CLAUDE_WORKING_DIR = os.environ.get("CLAUDE_WORKING_DIR")
 CLAUDE_TIMEOUT = int(os.environ.get("CLAUDE_TIMEOUT", "1800"))
 CLAUDE_CHECK_INTERVAL = int(os.environ.get("CLAUDE_CHECK_INTERVAL", "300"))
+# 1回の応答（1ターン）あたりのAPI費用上限（USD）。超過するとClaudeが応答を打ち切る
+CLAUDE_MAX_BUDGET_USD = os.environ.get("CLAUDE_MAX_BUDGET_USD", "2")
 IGNORE_NON_BOT_MENTIONS = os.environ.get("IGNORE_NON_BOT_MENTIONS", "1").strip().lower() in ("1", "true", "yes")
 SLACK_ATTACHMENTS_BASE = "/tmp/claude"
+
+# run_claude の戻り値。応答テキストに加え、費用と費用上限による打ち切りの有無を持つ
+ClaudeResult = collections.namedtuple("ClaudeResult", ["text", "cost_usd", "budget_exceeded"])
 
 app = App(token=os.environ["SLACK_BOT_TOKEN"])
 
@@ -172,9 +179,29 @@ def split_markdown(text, max_length=MARKDOWN_BLOCK_MAX_LENGTH):
     return chunks
 
 
+def format_cost_line(cost_usd):
+    """応答末尾に付与する費用表示行を生成する。費用が不明な場合は空文字を返す。"""
+    if cost_usd is None:
+        return ""
+    return f"\n\n---\n💰 このターンのコスト: ${cost_usd:.4f}"
+
+
 def run_claude(prompt, session_id, resume=False, on_still_running=None):
     os.makedirs(SLACK_ATTACHMENTS_BASE, exist_ok=True)
-    cmd = ["claude", "-p", "--add-dir", SLACK_ATTACHMENTS_BASE]
+    cmd = [
+        "claude",
+        "-p",
+        # JSON出力にして total_cost_usd や費用上限による打ち切りを検出できるようにする
+        "--output-format",
+        "json",
+        # 1ターンあたりの費用に上限を設ける（超過するとClaudeが応答を打ち切る）
+        "--max-budget-usd",
+        CLAUDE_MAX_BUDGET_USD,
+        # cwd/環境情報などの可変セクションをsystem promptから外し、プロンプトキャッシュの再利用率を上げる
+        "--exclude-dynamic-system-prompt-sections",
+        "--add-dir",
+        SLACK_ATTACHMENTS_BASE,
+    ]
     if resume:
         cmd += ["--resume", session_id, "--", prompt]
     else:
@@ -219,6 +246,19 @@ def run_claude(prompt, session_id, resume=False, on_still_running=None):
     stdout = stdout_chunks[0] if stdout_chunks else ""
     stderr = stderr_chunks[0] if stderr_chunks else ""
 
+    data = None
+    if stdout:
+        try:
+            data = json.loads(stdout)
+        except json.JSONDecodeError:
+            logger.warning("[claude] failed to parse JSON output: %s", stdout[:200])
+
+    # 費用上限による打ち切り。終了コードは非0になるが、CLIエラーとは区別して扱う
+    if data and data.get("subtype") == "error_max_budget_usd":
+        cost = data.get("total_cost_usd")
+        logger.warning("[claude] <<< max budget reached session=%s cost=%s", session_id, cost)
+        return ClaudeResult(text="", cost_usd=cost, budget_exceeded=True)
+
     if proc.returncode != 0:
         error_msg = (stderr.strip() or stdout.strip() or f"claude exited with code {proc.returncode}")
         logger.error("[claude] <<< error (code=%d): %s", proc.returncode, error_msg[:200])
@@ -226,9 +266,16 @@ def run_claude(prompt, session_id, resume=False, on_still_running=None):
             raise SessionResumeError(error_msg)
         raise RuntimeError(f"claude CLI error: {error_msg}")
 
-    output = stdout.strip()
-    logger.info("[claude] <<< %d chars | %s", len(output), output[:120])
-    return output
+    if data is None:
+        # JSON出力をパースできなかった場合は生のstdoutを応答として扱う（想定外時のフォールバック）
+        output = stdout.strip()
+        logger.info("[claude] <<< %d chars (raw) | %s", len(output), output[:120])
+        return ClaudeResult(text=output, cost_usd=None, budget_exceeded=False)
+
+    output = (data.get("result") or "").strip()
+    cost = data.get("total_cost_usd")
+    logger.info("[claude] <<< %d chars cost=%s | %s", len(output), cost, output[:120])
+    return ClaudeResult(text=output, cost_usd=cost, budget_exceeded=False)
 
 
 def post_response(text, files, channel, thread_ts, event_ts, say, client):
@@ -271,21 +318,39 @@ def post_response(text, files, channel, thread_ts, event_ts, say, client):
 
             if should_resume:
                 try:
-                    response = run_claude(prompt, session_id, resume=True, on_still_running=on_still_running)
+                    result = run_claude(prompt, session_id, resume=True, on_still_running=on_still_running)
                 except SessionResumeError:
                     logger.warning("[claude] resume failed, starting new session ts=%s", thread_ts)
                     session_id = str(uuid.uuid4())
                     thread_session_ids[thread_ts] = session_id
                     file_paths = download_slack_files(files, session_id)
                     prompt = build_prompt(text, file_paths)
-                    response = run_claude(prompt, session_id, on_still_running=on_still_running)
+                    result = run_claude(prompt, session_id, on_still_running=on_still_running)
             else:
-                response = run_claude(prompt, session_id, on_still_running=on_still_running)
+                result = run_claude(prompt, session_id, on_still_running=on_still_running)
 
-            if not response:
-                response = "応答を生成できませんでした。"
+            cost_line = format_cost_line(result.cost_usd)
 
-            chunks = split_markdown(response)
+            if result.budget_exceeded:
+                # 費用上限に達して応答が打ち切られたことをユーザーに知らせる
+                notice = (
+                    f":warning: 費用上限（${CLAUDE_MAX_BUDGET_USD}）に達したため、応答を途中で打ち切りました。\n"
+                    f"続きが必要な場合は新しいスレッドで小さく分割するか、"
+                    f"管理者に上限（環境変数 `CLAUDE_MAX_BUDGET_USD`）の引き上げを依頼してください。"
+                    f"{cost_line}"
+                )
+                say(
+                    blocks=[{"type": "markdown", "text": notice}],
+                    text=notice,
+                    thread_ts=thread_ts,
+                    metadata=make_session_metadata(session_id),
+                )
+                return
+
+            response = result.text or "応答を生成できませんでした。"
+
+            # total_cost_usd を末尾に付与してから分割する（チャンク長超過を防ぐため分割前に連結）
+            chunks = split_markdown(response + cost_line)
             for i, chunk in enumerate(chunks):
                 kwargs = {
                     "blocks": [{"type": "markdown", "text": chunk}],
